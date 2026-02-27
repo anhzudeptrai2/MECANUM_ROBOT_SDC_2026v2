@@ -25,6 +25,37 @@ static float rads_2_rpm(float rads_in)
     return (rads_in * 60.0f) / (2.0f * PI);
 }
 
+static float rpm_2_rads(float rpm_in)
+{
+    return (rpm_in * 2.0f * PI) / 60.0f;
+}
+
+static float normalize_angle_rad(float angle)
+{
+    while (angle > PI)
+    {
+        angle -= 2.0f * PI;
+    }
+    while (angle < -PI)
+    {
+        angle += 2.0f * PI;
+    }
+    return angle;
+}
+
+static float normalize_angle_deg(float angle)
+{
+    while (angle > 180.0f)
+    {
+        angle -= 360.0f;
+    }
+    while (angle < -180.0f)
+    {
+        angle += 360.0f;
+    }
+    return angle;
+}
+
 static void Joystick_To_Velocity(MRb *robot, float max_speed, float max_omega)
 {
     /* Deadband on normalized joystick [-1..1] */
@@ -47,6 +78,15 @@ static void Joystick_To_Velocity(MRb *robot, float max_speed, float max_omega)
 
     if (robot->is_yaw_fix)
     {
+        float shortest_err_deg = normalize_angle_deg((float)(robot->fix_angle - robot->IMU_theta));
+        robot->fix_angle = robot->IMU_theta + shortest_err_deg;
+
+        if (fabsf(shortest_err_deg) < ANGLE_DEADBAND)
+        {
+            robot->omega = 0.0f;
+            return;
+        }
+
         PID_Compute(&Mecanum_Omega_PID);
         robot->omega = (float)Mecanum_Omega_PID_Out;
     }
@@ -58,6 +98,8 @@ static void Joystick_To_Velocity(MRb *robot, float max_speed, float max_omega)
 
 void MecanumRobot_Init(MRb *robot, float m_speed, float m_omg)
 {
+    robot->x = 0.0f;
+    robot->y = 0.0f;
     robot->vx = 0.0f;
     robot->vy = 0.0f;
     robot->omega = 0.0f;
@@ -90,6 +132,41 @@ void MecanumRobot_Init(MRb *robot, float m_speed, float m_omg)
     PID_SetOutputLimits(&Mecanum_Omega_PID, -Mecanum_Speed_Omega_PID, Mecanum_Speed_Omega_PID);
 }
 
+void MecanumRobot_ForwardKinematicsFromRPM(float u_fl_rpm, float u_fr_rpm, float u_rl_rpm, float u_rr_rpm,
+                                           float *vx_robot, float *vy_robot, float *omega_robot)
+{
+    float w_fl = rpm_2_rads(u_fl_rpm);
+    float w_fr = rpm_2_rads(u_fr_rpm);
+    float w_rl = rpm_2_rads(u_rl_rpm);
+    float w_rr = rpm_2_rads(u_rr_rpm);
+
+    *vx_robot = (MECANUM_WHEEL_RADIUS / 4.0f) * (w_fl + w_fr + w_rl + w_rr);
+    *vy_robot = (MECANUM_WHEEL_RADIUS / 4.0f) * (-w_fl + w_fr + w_rl - w_rr);
+    *omega_robot = (MECANUM_WHEEL_RADIUS / (4.0f * MECANUM_L)) * (-w_fl + w_fr - w_rl + w_rr);
+}
+
+void MecanumRobot_UpdatePose(MRb *robot, float dt_s)
+{
+    float vx_robot;
+    float vy_robot;
+    float omega_robot;
+
+    MecanumRobot_ForwardKinematicsFromRPM(robot->u[0], robot->u[1], robot->u[2], robot->u[3],
+                                          &vx_robot, &vy_robot, &omega_robot);
+
+    {
+        float cos_theta = cosf(robot->theta);
+        float sin_theta = sinf(robot->theta);
+        float vx_field = vx_robot * cos_theta - vy_robot * sin_theta;
+        float vy_field = vx_robot * sin_theta + vy_robot * cos_theta;
+
+        robot->x += vx_field * dt_s;
+        robot->y += vy_field * dt_s;
+    }
+
+    robot->theta = normalize_angle_rad(robot->theta + omega_robot * dt_s);
+}
+
 void MecanumRobot_CalculateWheelSpeeds(MRb *robot, float *u_fl, float *u_fr, float *u_rl, float *u_rr)
 {
     /* Field-centric to robot-centric transformation */
@@ -104,12 +181,10 @@ void MecanumRobot_CalculateWheelSpeeds(MRb *robot, float *u_fl, float *u_fr, flo
      * V_RR = Vx - Vy + omega * L
      * where L = Lx + Ly
      */
-    float L = MECANUM_LX + MECANUM_LY;
-
-    float w_fl = (vx_robot - vy_robot - L * robot->omega) / MECANUM_WHEEL_RADIUS;
-    float w_fr = (vx_robot + vy_robot + L * robot->omega) / MECANUM_WHEEL_RADIUS;
-    float w_rl = (vx_robot + vy_robot - L * robot->omega) / MECANUM_WHEEL_RADIUS;
-    float w_rr = (vx_robot - vy_robot + L * robot->omega) / MECANUM_WHEEL_RADIUS;
+    float w_fl = (vx_robot - vy_robot - MECANUM_L * robot->omega) / MECANUM_WHEEL_RADIUS;
+    float w_fr = (vx_robot + vy_robot + MECANUM_L * robot->omega) / MECANUM_WHEEL_RADIUS;
+    float w_rl = (vx_robot + vy_robot - MECANUM_L * robot->omega) / MECANUM_WHEEL_RADIUS;
+    float w_rr = (vx_robot - vy_robot + MECANUM_L * robot->omega) / MECANUM_WHEEL_RADIUS;
 
     *u_fl = rads_2_rpm(w_fl);
     *u_fr = rads_2_rpm(w_fr);

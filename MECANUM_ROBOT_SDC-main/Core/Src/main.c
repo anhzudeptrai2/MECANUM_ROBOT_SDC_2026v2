@@ -104,6 +104,11 @@ float prev_vx_cmd = 0.0f;
 float prev_vy_cmd = 0.0f;
 float prev_omg_cmd = 0.0f;
 
+// Motor 3 anti-dropout runtime state (for debug/monitor in watch window)
+volatile uint32_t M3_Dropout_Events = 0;
+volatile uint8_t M3_Dropout_Hold_Counter = 0;
+volatile int16_t M3_Last_Good_Cmd = 0;
+
 typedef enum
 {
   LED_A,
@@ -111,6 +116,21 @@ typedef enum
   LED_RUN,
   LED_FAULT
 } LED_TypeDef;
+
+#define JOYSTICK_DEADBAND 0.06f
+#define SLEW_VX_PER_MS 0.008f
+#define SLEW_VY_PER_MS 0.008f
+#define SLEW_OMG_PER_MS 0.008f
+#define WHEEL1_GAIN 1.00f
+#define WHEEL2_GAIN 0.75f
+#define WHEEL3_GAIN 1.00f
+#define WHEEL4_GAIN 1.00f
+
+#define M3_ZERO_THRESH 8
+#define YAW_SPEED_SCALE 1.5f
+#define M3_LAST_GOOD_THRESH 40
+#define M3_OTHER_ACTIVE_THRESH 60
+#define M3_HOLD_MS 30
 
 /* USER CODE END PV */
 
@@ -125,6 +145,38 @@ static void MPU_Config(void);
 /* USER CODE BEGIN 0 */
 void Robot_Hold_Stop(void);
 void HandleButtonPress(void);
+
+static float NormalizeAngleDeg(float angle_deg)
+{
+  while (angle_deg > 180.0f)
+    angle_deg -= 360.0f;
+  while (angle_deg < -180.0f)
+    angle_deg += 360.0f;
+  return angle_deg;
+}
+
+static float ClampFloat(float value, float min_val, float max_val)
+{
+  if (value > max_val)
+    return max_val;
+  if (value < min_val)
+    return min_val;
+  return value;
+}
+
+static int16_t ClampToInt16(float value)
+{
+  if (value > 32767.0f)
+    return 32767;
+  if (value < -32768.0f)
+    return -32768;
+  return (int16_t)value;
+}
+
+static int16_t AbsInt16(int16_t value)
+{
+  return (value < 0) ? (int16_t)(-value) : value;
+}
 
 void Set_LED_State(LED_TypeDef led, GPIO_PinState state)
 {
@@ -327,7 +379,6 @@ void Mecanum_Calculate(void)
 {
   float mapped_x, mapped_y, mapped_z;
   float vx_cmd, vy_cmd, omg_cmd;
-  float abs_x, abs_y;
   float angle_error;
   float vx_diff, vy_diff, omg_diff;
 
@@ -337,10 +388,10 @@ void Mecanum_Calculate(void)
   // L2 Speed Boost: tang toc x2
   if (PS4_Dat.l2_analog > 100)
   {
-    Mecanum_4_Bot.max_speed *= 4.0f;
+    Mecanum_4_Bot.max_speed *= 2.0f;
   }
 
-  Mecanum_4_Bot.max_omega = Mecanum_4_Bot.max_speed * 0.8f;
+  Mecanum_4_Bot.max_omega = Mecanum_4_Bot.max_speed * 0.8f * YAW_SPEED_SCALE;
 
   // Doc joystick va chuan hoa
   mapped_x = (float)PS4_Dat.l_stick_x / 128.0f;
@@ -348,22 +399,22 @@ void Mecanum_Calculate(void)
   mapped_z = (float)PS4_Dat.r_stick_x / 128.0f;
 
   // Deadband
-  if (mapped_x > -0.02f && mapped_x < 0.02f)
+  if (mapped_x > -JOYSTICK_DEADBAND && mapped_x < JOYSTICK_DEADBAND)
     mapped_x = 0.0f;
-  if (mapped_y > -0.02f && mapped_y < 0.02f)
+  if (mapped_y > -JOYSTICK_DEADBAND && mapped_y < JOYSTICK_DEADBAND)
     mapped_y = 0.0f;
-  if (mapped_z > -0.02f && mapped_z < 0.02f)
+  if (mapped_z > -JOYSTICK_DEADBAND && mapped_z < JOYSTICK_DEADBAND)
     mapped_z = 0.0f;
 
   // Tinh van toc mong muon (ap dung dao chieu)
   vx_cmd = mapped_y * Mecanum_4_Bot.max_speed * Robot_Direction;
-  vy_cmd = -mapped_x * Mecanum_4_Bot.max_speed * Robot_Direction;
+  vy_cmd = mapped_x * Mecanum_4_Bot.max_speed * Robot_Direction;
   omg_cmd = -mapped_z * Mecanum_4_Bot.max_omega;
 
   // Xu ly nut RIGHT/LEFT: di ngang va giu goc
   if (Button_State & BUTTON_RIGHT)
   {
-    vy_cmd = -Mecanum_4_Bot.max_speed * 0.7f;
+    vy_cmd = Mecanum_4_Bot.max_speed * 0.7f;
     if (!Button_Strafe_Lock)
     {
       Mecanum_4_Bot.fix_angle = -IMU.Yaw;
@@ -375,7 +426,7 @@ void Mecanum_Calculate(void)
   }
   else if (Button_State & BUTTON_LEFT)
   {
-    vy_cmd = Mecanum_4_Bot.max_speed * 0.7f;
+    vy_cmd = -Mecanum_4_Bot.max_speed * 0.7f;
     if (!Button_Strafe_Lock)
     {
       Mecanum_4_Bot.fix_angle = -IMU.Yaw;
@@ -399,20 +450,20 @@ void Mecanum_Calculate(void)
   vy_diff = vy_cmd - prev_vy_cmd;
   omg_diff = omg_cmd - prev_omg_cmd;
 
-  if (vx_diff > 0.025f)
-    vx_cmd = prev_vx_cmd + 0.025f;
-  else if (vx_diff < -0.025f)
-    vx_cmd = prev_vx_cmd - 0.025f;
+  if (vx_diff > SLEW_VX_PER_MS)
+    vx_cmd = prev_vx_cmd + SLEW_VX_PER_MS;
+  else if (vx_diff < -SLEW_VX_PER_MS)
+    vx_cmd = prev_vx_cmd - SLEW_VX_PER_MS;
 
-  if (vy_diff > 0.04f)
-    vy_cmd = prev_vy_cmd + 0.04f;
-  else if (vy_diff < -0.04f)
-    vy_cmd = prev_vy_cmd - 0.04f;
+  if (vy_diff > SLEW_VY_PER_MS)
+    vy_cmd = prev_vy_cmd + SLEW_VY_PER_MS;
+  else if (vy_diff < -SLEW_VY_PER_MS)
+    vy_cmd = prev_vy_cmd - SLEW_VY_PER_MS;
 
-  if (omg_diff > 0.02f)
-    omg_cmd = prev_omg_cmd + 0.02f;
-  else if (omg_diff < -0.02f)
-    omg_cmd = prev_omg_cmd - 0.02f;
+  if (omg_diff > SLEW_OMG_PER_MS)
+    omg_cmd = prev_omg_cmd + SLEW_OMG_PER_MS;
+  else if (omg_diff < -SLEW_OMG_PER_MS)
+    omg_cmd = prev_omg_cmd - SLEW_OMG_PER_MS;
 
   // Luu gia tri cho lan sau
   prev_vx_cmd = vx_cmd;
@@ -428,7 +479,9 @@ void Mecanum_Calculate(void)
     // Neu nguoi dung dang chu dong xoay, uu tien input cua nguoi dung
     if (fabsf(mapped_z) < 0.05f)
     {
-      angle_error = fabsf(Mecanum_4_Bot.fix_angle - Mecanum_4_Bot.IMU_theta);
+      float shortest_err_deg = NormalizeAngleDeg((float)(Mecanum_4_Bot.fix_angle - Mecanum_4_Bot.IMU_theta));
+      Mecanum_4_Bot.fix_angle = Mecanum_4_Bot.IMU_theta + shortest_err_deg;
+      angle_error = fabsf(shortest_err_deg);
       if (angle_error > 2.0f)
       {
         PID_Compute(&Mecanum_Omega_PID);
@@ -443,15 +496,42 @@ void Mecanum_Calculate(void)
     }
   }
 
+  omg_cmd = ClampFloat(omg_cmd, -Mecanum_4_Bot.max_omega, Mecanum_4_Bot.max_omega);
+
   // Tinh dong hoc Mecanum
   MecanumRobot_SetMotion(&Mecanum_4_Bot, vx_cmd, vy_cmd, omg_cmd, IMU.Yaw, 0);
 
   if (!Button_UP_Active)
   {
-    Wheel_Motors[0].Set_Point = (int16_t)(Mecanum_4_Bot.u[0]) * 0.73f;
-    Wheel_Motors[1].Set_Point = -(int16_t)(Mecanum_4_Bot.u[1]);
-    Wheel_Motors[2].Set_Point = (int16_t)(Mecanum_4_Bot.u[2]);
-    Wheel_Motors[3].Set_Point = -(int16_t)(Mecanum_4_Bot.u[3]);
+    int16_t cmd_m1 = ClampToInt16(Mecanum_4_Bot.u[0] * WHEEL1_GAIN);
+    int16_t cmd_m2 = ClampToInt16(-Mecanum_4_Bot.u[1] * WHEEL2_GAIN);
+    int16_t cmd_m3 = ClampToInt16(-Mecanum_4_Bot.u[2] * WHEEL3_GAIN);
+    int16_t cmd_m4 = ClampToInt16(-Mecanum_4_Bot.u[3] * WHEEL4_GAIN);
+
+    int16_t avg_others = (int16_t)((AbsInt16(cmd_m1) + AbsInt16(cmd_m2) + AbsInt16(cmd_m4)) / 3);
+    uint8_t m3_dropout_now = (AbsInt16(cmd_m3) <= M3_ZERO_THRESH) &&
+                             (AbsInt16(M3_Last_Good_Cmd) >= M3_LAST_GOOD_THRESH) &&
+                             (avg_others >= M3_OTHER_ACTIVE_THRESH);
+
+    if (m3_dropout_now && (M3_Dropout_Hold_Counter < M3_HOLD_MS))
+    {
+      cmd_m3 = M3_Last_Good_Cmd;
+      M3_Dropout_Hold_Counter++;
+      if (M3_Dropout_Hold_Counter == 1)
+      {
+        M3_Dropout_Events++;
+      }
+    }
+    else
+    {
+      M3_Dropout_Hold_Counter = 0;
+      M3_Last_Good_Cmd = cmd_m3;
+    }
+
+    Wheel_Motors[0].Set_Point = cmd_m1;
+    Wheel_Motors[1].Set_Point = cmd_m2;
+    Wheel_Motors[2].Set_Point = cmd_m3;
+    Wheel_Motors[3].Set_Point = cmd_m4;
   }
 }
 
@@ -490,8 +570,10 @@ void Motor_Update(void)
 
   if (motor_send_flag == 0)
   {
-    motor_send_flag = 1;
-    Driver_Send_Setpoints_U1(Wheel_Motors, 4);
+    if (Driver_Send_Setpoints_U1(Wheel_Motors, 4) == HAL_OK)
+    {
+      motor_send_flag = 1;
+    }
   }
 }
 
@@ -556,7 +638,7 @@ int main(void)
   Assign_PID_AML_Id(&Wheel_Motors[1], 2);
   Assign_PID_AML_Id(&Wheel_Motors[2], 3);
   Assign_PID_AML_Id(&Wheel_Motors[3], 4);
-  Driver_Send_Setpoints_U1(Wheel_Motors, 4);
+  (void)Driver_Send_Setpoints_U1(Wheel_Motors, 4);
 
   // Khoi tao Timeout Timer
   Timeout_Begin();

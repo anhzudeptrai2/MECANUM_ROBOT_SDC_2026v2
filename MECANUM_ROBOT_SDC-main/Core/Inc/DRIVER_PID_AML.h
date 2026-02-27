@@ -32,6 +32,6 @@ void Driver_PID_AML_Init_UART(UART_HandleTypeDef *uart_par, Motor_Driver *motor)
 void Assign_PID_AML_Id(Motor_Driver *motor, uint8_t id);
 void Driver_Home_Request(Motor_Driver motor);
 void Driver_Set_Zero_Position(Motor_Driver motor);
-void Driver_Send_Setpoints_U1(Motor_Driver *motors, uint8_t num_motors);
-void Driver_Send_Setpoints_U2(Motor_Driver *motors, uint8_t num_motors);
+HAL_StatusTypeDef Driver_Send_Setpoints_U1(Motor_Driver *motors, uint8_t num_motors);
+HAL_StatusTypeDef Driver_Send_Setpoints_U2(Motor_Driver *motors, uint8_t num_motors);
 #endif // DRIVER_PID_AML_H

@@ -105,7 +105,7 @@ void Driver_Set_Zero_Position(Motor_Driver motor)
     HAL_UART_Transmit(motor.Driver_UART, (uint8_t *)buffer, 4, 200);
 }
 
-void Driver_Send_Setpoints_U1(Motor_Driver *motors, uint8_t num_motors)
+HAL_StatusTypeDef Driver_Send_Setpoints_U1(Motor_Driver *motors, uint8_t num_motors)
 {
     static uint8_t buffer_tx_setpoints_u1[40];
     memset(buffer_tx_setpoints_u1, 0, sizeof(buffer_tx_setpoints_u1));
@@ -133,9 +133,11 @@ void Driver_Send_Setpoints_U1(Motor_Driver *motors, uint8_t num_motors)
     {
         AML_TxDmaErr++;
     }
+
+    return st;
 }
 
-void Driver_Send_Setpoints_U2(Motor_Driver *motors, uint8_t num_motors)
+HAL_StatusTypeDef Driver_Send_Setpoints_U2(Motor_Driver *motors, uint8_t num_motors)
 {
     static uint8_t buffer_tx_setpoints_u2[40];
     memset(buffer_tx_setpoints_u2, 0, sizeof(buffer_tx_setpoints_u2));
@@ -163,4 +165,6 @@ void Driver_Send_Setpoints_U2(Motor_Driver *motors, uint8_t num_motors)
     {
         AML_TxDmaErr++;
     }
+
+    return st;
 }

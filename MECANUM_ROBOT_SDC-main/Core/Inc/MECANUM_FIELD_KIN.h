@@ -29,8 +29,8 @@
  * MECANUM_LY: half-width  (center to wheel in y) [m]
  */
 #define MECANUM_WHEEL_RADIUS 0.04f
-#define MECANUM_LX 0.175f
-#define MECANUM_LY 0.17f
+#define MECANUM_LX 0.23f
+#define MECANUM_LY 0.1975f
 #define Robot_Max_Speed 1.00f // m/s
 #define Robot_Max_Omega 0.5f  // rad/s
 
@@ -38,6 +38,8 @@
 
 typedef struct
 {
+    float x;     // Field position X (m)
+    float y;     // Field position Y (m)
     float vx;    // Linear speed X (m/s)
     float vy;    // Linear speed Y (m/s)
     float omega; // Angular speed (rad/s)
@@ -63,5 +65,8 @@ void MecanumRobot_Init(MRb *robot, float m_speed, float m_omg);
 void MecanumRobot_Field_Control(MRb *robot, PS4_DATA *ps4_joy, float imu_theta, uint8_t neg_heading);
 void MecanumRobot_CalculateWheelSpeeds(MRb *robot, float *u_fl, float *u_fr, float *u_rl, float *u_rr);
 void MecanumRobot_SetMotion(MRb *robot, float vx, float vy, float omega, float imu_theta_deg, uint8_t neg_heading);
+void MecanumRobot_ForwardKinematicsFromRPM(float u_fl_rpm, float u_fr_rpm, float u_rl_rpm, float u_rr_rpm,
+                                           float *vx_robot, float *vy_robot, float *omega_robot);
+void MecanumRobot_UpdatePose(MRb *robot, float dt_s);
 
 #endif /* MECANUM_4_FIELD_KIN_H */
