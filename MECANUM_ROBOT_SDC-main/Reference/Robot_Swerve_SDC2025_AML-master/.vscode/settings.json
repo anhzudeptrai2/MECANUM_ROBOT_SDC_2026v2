@@ -1,0 +1,22 @@
+{
+    "files.associations": {
+        "*.sqlbook": "sql",
+        "*.ndjson": "jsonl",
+        "*.dbclient-js": "javascript",
+        "timer_timeout.h": "c",
+        "wt901c.h": "c",
+        "driver_pid_aml.h": "c",
+        "ps4_esp.h": "c",
+        "stdint.h": "c",
+        "swerve_x4_kinematic.h": "c",
+        "stdlib.h": "c",
+        "stm32h7xx_hal.h": "c",
+        "string.h": "c",
+        "robot_acceleration.h": "c",
+        "nextion_hmi.h": "c",
+        "encoder.h": "c",
+        "sick_dt50.h": "c",
+        "pid.h": "c",
+        "main.h": "c"
+    }
+}

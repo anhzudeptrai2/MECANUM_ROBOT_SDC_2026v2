@@ -1,0 +1,5 @@
+C:/Users/84886/Desktop/Project STM32/ROBOT_SDC_AML_SWERVE_2025/CMakeFiles/ROBOT_SDC_AML_SWERVE_2025.dir
+C:/Users/84886/Desktop/Project STM32/ROBOT_SDC_AML_SWERVE_2025/CMakeFiles/edit_cache.dir
+C:/Users/84886/Desktop/Project STM32/ROBOT_SDC_AML_SWERVE_2025/CMakeFiles/rebuild_cache.dir
+C:/Users/84886/Desktop/Project STM32/ROBOT_SDC_AML_SWERVE_2025/cmake/stm32cubemx/CMakeFiles/edit_cache.dir
+C:/Users/84886/Desktop/Project STM32/ROBOT_SDC_AML_SWERVE_2025/cmake/stm32cubemx/CMakeFiles/rebuild_cache.dir
