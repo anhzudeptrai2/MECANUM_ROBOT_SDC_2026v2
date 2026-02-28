@@ -28,11 +28,11 @@
  * MECANUM_LX: half-length (center to wheel in x) [m]
  * MECANUM_LY: half-width  (center to wheel in y) [m]
  */
-#define MECANUM_WHEEL_RADIUS 0.04f
+#define MECANUM_WHEEL_RADIUS 0.044f
 #define MECANUM_LX 0.23f
 #define MECANUM_LY 0.1975f
-#define Robot_Max_Speed 1.00f // m/s
-#define Robot_Max_Omega 0.5f  // rad/s
+#define Robot_Max_Speed 3.0f // m/s
+#define Robot_Max_Omega 1.0f  // rad/s
 
 #define MECANUM_L (MECANUM_LX + MECANUM_LY)
 

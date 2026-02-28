@@ -382,10 +382,9 @@ void Mecanum_Calculate(void)
   float angle_error;
   float vx_diff, vy_diff, omg_diff;
 
-  // Dieu chinh toc do theo R2: khong nhan R2 = toc do toi da, nhan het R2 = giam 64%
-  Mecanum_4_Bot.max_speed = 0.84f - (0.54f * PS4_Dat.r2_analog / 255.0f);
 
-  // L2 Speed Boost: tang toc x2
+  Mecanum_4_Bot.max_speed = 1.68f - (1.08f * PS4_Dat.r2_analog / 255.0f);
+
   if (PS4_Dat.l2_analog > 100)
   {
     Mecanum_4_Bot.max_speed *= 2.0f;
