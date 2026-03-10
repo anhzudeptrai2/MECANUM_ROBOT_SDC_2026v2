@@ -64,6 +64,9 @@ typedef enum
 } ButtonState_t;
 volatile ButtonState_t Button_Hold_State = BUTTON_IDLE;
 
+volatile uint8_t Button_Debounce_Counter = 0;
+#define BUTTON_DEBOUNCE_THRESHOLD 5
+
 // Timeout va Flags
 Task_Timeout Task_TO[TASK_NUMS];
 uint16_t Timer_OVF_Flag_2 = 0;
@@ -99,12 +102,10 @@ struct
   uint16_t counter;
 } Buzzer = {0};
 
-// Acceleration limiting
 float prev_vx_cmd = 0.0f;
 float prev_vy_cmd = 0.0f;
 float prev_omg_cmd = 0.0f;
 
-// Motor 3 anti-dropout runtime state (for debug/monitor in watch window)
 volatile uint32_t M3_Dropout_Events = 0;
 volatile uint8_t M3_Dropout_Hold_Counter = 0;
 volatile int16_t M3_Last_Good_Cmd = 0;
@@ -122,7 +123,7 @@ typedef enum
 #define SLEW_VY_PER_MS 0.008f
 #define SLEW_OMG_PER_MS 0.008f
 #define WHEEL1_GAIN 1.00f
-#define WHEEL2_GAIN 0.75f
+#define WHEEL2_GAIN 0.68f
 #define WHEEL3_GAIN 1.00f
 #define WHEEL4_GAIN 1.00f
 
@@ -209,7 +210,6 @@ void Buzzer_Update(void)
   }
 }
 
-// Timer callback - 1ms
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM5)
@@ -247,7 +247,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-  if (huart->Instance == USART1)
+  if (huart->Instance == USART1)    
   {
     PS4_UART_Rx_IDLE_Handle();
     Timer_Timeout_Reset(&Task_TO[0]);
@@ -267,18 +267,38 @@ void HandleButtonPress(void)
   case BUTTON_IDLE:
     if (Button_State != 0)
     {
-      Last_Button = Button_State;
-      Button_Hold_State = BUTTON_PRESSED;
+      Button_Debounce_Counter++;
+      if (Button_Debounce_Counter >= BUTTON_DEBOUNCE_THRESHOLD)
+      {
+        Last_Button = Button_State;
+        Button_Hold_State = BUTTON_PRESSED;
+        Button_Debounce_Counter = 0;
+      }
+    }
+    else
+    {
+      Button_Debounce_Counter = 0;
     }
     break;
 
   case BUTTON_PRESSED:
     if (Button_State == 0)
-      Button_Hold_State = BUTTON_RELEASED;
+    {
+      Button_Debounce_Counter++;
+      if (Button_Debounce_Counter >= BUTTON_DEBOUNCE_THRESHOLD)
+      {
+        Button_Hold_State = BUTTON_RELEASED;
+        Button_Debounce_Counter = 0;
+      }
+    }
+    else
+    {
+      Button_Debounce_Counter = 0;
+    }
     break;
 
   case BUTTON_RELEASED:
-    if (Last_Button & BUTTON_CROSS)
+    if (Last_Button == BUTTON_CROSS)
     {
       Button_X_Active = !Button_X_Active;
       if (Button_X_Active)
@@ -286,6 +306,7 @@ void HandleButtonPress(void)
         Mecanum_4_Bot.fix_angle = -IMU.Yaw;
         Mecanum_4_Bot.is_yaw_fix = 1;
         Button_Circle_Active = 0;
+        Button_Strafe_Lock = 0;
         Buzzer_Beep(100);
       }
       else
@@ -294,74 +315,37 @@ void HandleButtonPress(void)
         Buzzer_Beep(50);
       }
     }
-    else if (Last_Button & BUTTON_CIRCLE)
-    {
-      Button_Circle_Active = !Button_Circle_Active;
-      if (Button_Circle_Active)
-      {
-        Mecanum_4_Bot.fix_angle = initial_angle;
-        Mecanum_4_Bot.is_yaw_fix = 1;
-        Button_X_Active = 0;
-        Buzzer_Beep(100);
-      }
-      else
-      {
-        Mecanum_4_Bot.is_yaw_fix = 0;
-        Buzzer_Beep(50);
-      }
-    }
-    else if (Last_Button & BUTTON_TRIANGLE)
+    else if (Last_Button == BUTTON_TRIANGLE)
     {
       Robot_Reset_Home = 1;
       Button_X_Active = 0;
       Button_Circle_Active = 0;
+      Button_Strafe_Lock = 0;
       Mecanum_4_Bot.is_yaw_fix = 0;
       Buzzer_Beep(150);
     }
-    else if (Last_Button & BUTTON_L1)
+    else if (Last_Button == BUTTON_L1)
     {
       Robot_Direction = -Robot_Direction;
       Buzzer_Beep(80);
     }
-    else if (Last_Button & BUTTON_SQUARE)
+    else if (Last_Button == BUTTON_SQUARE)
     {
       Buzzer_Beep(50);
     }
-    else if (Last_Button & BUTTON_OPTIONS)
+    else if (Last_Button == BUTTON_OPTIONS)
     {
       Buzzer_Beep(50);
     }
-    else if (Last_Button & BUTTON_UP)
-    {
-      Button_UP_Active = !Button_UP_Active;
-      if (Button_UP_Active)
-      {
-        Wheel_Motors[0].Set_Point = 60;
-        Wheel_Motors[1].Set_Point = -60;
-        Wheel_Motors[2].Set_Point = 60;
-        Wheel_Motors[3].Set_Point = -60;
-
-        Buzzer_Beep(100);
-      }
-      else
-      {
-        for (int i = 0; i < 4; i++)
-          Wheel_Motors[i].Set_Point = 0;
-        Buzzer_Beep(50);
-      }
-    }
+    Last_Button = BUTTON_NONE;
     Button_Hold_State = BUTTON_IDLE;
+    Button_Debounce_Counter = 0;
     break;
   }
 
   // Cap nhat trang thai giu goc
   if (Button_X_Active)
     Mecanum_4_Bot.is_yaw_fix = 1;
-  else if (Button_Circle_Active)
-  {
-    Mecanum_4_Bot.fix_angle = initial_angle;
-    Mecanum_4_Bot.is_yaw_fix = 1;
-  }
 }
 
 // Xu ly PS4
@@ -410,41 +394,26 @@ void Mecanum_Calculate(void)
   vy_cmd = mapped_x * Mecanum_4_Bot.max_speed * Robot_Direction;
   omg_cmd = -mapped_z * Mecanum_4_Bot.max_omega;
 
-  // Xu ly nut RIGHT/LEFT: di ngang va giu goc
+  // Xu ly nut RIGHT/LEFT: chi di ngang, KHONG tu bat/tat khoa goc
   if (Button_State & BUTTON_RIGHT)
   {
     vy_cmd = Mecanum_4_Bot.max_speed * 0.7f;
-    if (!Button_Strafe_Lock)
-    {
-      Mecanum_4_Bot.fix_angle = -IMU.Yaw;
-      Mecanum_4_Bot.is_yaw_fix = 1;
-      Button_Strafe_Lock = 1;
-      Button_X_Active = 0;
-      Button_Circle_Active = 0;
-    }
+    Button_Strafe_Lock = 1;
   }
   else if (Button_State & BUTTON_LEFT)
   {
     vy_cmd = -Mecanum_4_Bot.max_speed * 0.7f;
-    if (!Button_Strafe_Lock)
-    {
-      Mecanum_4_Bot.fix_angle = -IMU.Yaw;
-      Mecanum_4_Bot.is_yaw_fix = 1;
-      Button_Strafe_Lock = 1;
-      Button_X_Active = 0;
-      Button_Circle_Active = 0;
-    }
+    Button_Strafe_Lock = 1;
   }
   else
   {
     if (Button_Strafe_Lock)
     {
       Button_Strafe_Lock = 0;
-      Mecanum_4_Bot.is_yaw_fix = 0;
     }
   }
 
-  // Acceleration limiting (gioi han gia toc)
+  // Gioi han gia toc
   vx_diff = vx_cmd - prev_vx_cmd;
   vy_diff = vy_cmd - prev_vy_cmd;
   omg_diff = omg_cmd - prev_omg_cmd;
@@ -624,7 +593,7 @@ int main(void)
   // Khoi tao PS4
   PS4_Init(&huart1);
 
-  // Khoi tao IMU
+  // Khoi tao IMU 
   WT901C_Init(&IMU, &huart2);
   WT901C_Begin_Recieve(&IMU);
 

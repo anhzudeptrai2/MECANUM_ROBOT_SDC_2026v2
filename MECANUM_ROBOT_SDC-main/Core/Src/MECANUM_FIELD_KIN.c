@@ -2,7 +2,7 @@
 
 /* PID tuning for yaw-hold (omega control) */
 double Mecanum_Omega_PID_Out;
-static double Mecanum_Kp_Omega = 0.8f; // Giảm Kp để mượt hơn
+static double Mecanum_Kp_Omega = 0.85f; // Giảm Kp để mượt hơn
 static double Mecanum_Ki_Omega = 0.001f;
 static double Mecanum_Kd_Omega = 0.008f;
 static double Mecanum_Speed_Omega_PID = 0.8f;
