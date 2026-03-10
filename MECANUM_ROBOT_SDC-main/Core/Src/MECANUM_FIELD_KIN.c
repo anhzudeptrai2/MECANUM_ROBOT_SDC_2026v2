@@ -2,10 +2,10 @@
 
 /* PID tuning for yaw-hold (omega control) */
 double Mecanum_Omega_PID_Out;
-static double Mecanum_Kp_Omega = 0.85f; // Giảm Kp để mượt hơn
-static double Mecanum_Ki_Omega = 0.001f;
-static double Mecanum_Kd_Omega = 0.008f;
-static double Mecanum_Speed_Omega_PID = 0.8f;
+static double Mecanum_Kp_Omega = 0.90f;
+static double Mecanum_Ki_Omega = 0.0020f;
+static double Mecanum_Kd_Omega = 0.024f;
+static double Mecanum_Speed_Omega_PID = 0.78f;
 #define ANGLE_DEADBAND 5.0f // Deadband 5 độ để tránh nhiễu IMU
 
 extern PID_TypeDef Mecanum_Omega_PID;

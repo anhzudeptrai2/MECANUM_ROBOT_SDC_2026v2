@@ -106,10 +106,6 @@ float prev_vx_cmd = 0.0f;
 float prev_vy_cmd = 0.0f;
 float prev_omg_cmd = 0.0f;
 
-volatile uint32_t M3_Dropout_Events = 0;
-volatile uint8_t M3_Dropout_Hold_Counter = 0;
-volatile int16_t M3_Last_Good_Cmd = 0;
-
 typedef enum
 {
   LED_A,
@@ -127,11 +123,16 @@ typedef enum
 #define WHEEL3_GAIN 1.00f
 #define WHEEL4_GAIN 1.00f
 
-#define M3_ZERO_THRESH 8
 #define YAW_SPEED_SCALE 1.5f
-#define M3_LAST_GOOD_THRESH 40
-#define M3_OTHER_ACTIVE_THRESH 60
-#define M3_HOLD_MS 30
+#define YAW_FIX_ACTIVE_ERR_DEG 1.0f
+#define YAW_FIX_ROT_INPUT_DEADBAND 0.04f
+#define YAW_FIX_ROT_INTENT_THRESH 0.20f
+#define YAW_FIX_ROT_INTENT_HOLD_MS 40
+#define YAW_MIN_OMEGA 1.0f
+#define YAW_FIX_LARGE_ERR_DEG 8.0f
+#define YAW_FIX_LARGE_ERR_BOOST 1.15f
+#define YAW_FIX_NEAR_BOOST 1.00f
+#define YAW_CORR_SLEW_PER_MS 0.010f
 
 /* USER CODE END PV */
 
@@ -305,6 +306,7 @@ void HandleButtonPress(void)
       {
         Mecanum_4_Bot.fix_angle = -IMU.Yaw;
         Mecanum_4_Bot.is_yaw_fix = 1;
+        PID_Init(&Mecanum_Omega_PID);
         Button_Circle_Active = 0;
         Button_Strafe_Lock = 0;
         Buzzer_Beep(100);
@@ -365,6 +367,9 @@ void Mecanum_Calculate(void)
   float vx_cmd, vy_cmd, omg_cmd;
   float angle_error;
   float vx_diff, vy_diff, omg_diff;
+  static uint8_t yaw_manual_rotate_counter = 0;
+  static float yaw_corr_prev = 0.0f;
+  static uint8_t yaw_deadband_latched = 0;
 
 
   Mecanum_4_Bot.max_speed = 1.68f - (1.08f * PS4_Dat.r2_analog / 255.0f);
@@ -375,6 +380,10 @@ void Mecanum_Calculate(void)
   }
 
   Mecanum_4_Bot.max_omega = Mecanum_4_Bot.max_speed * 0.8f * YAW_SPEED_SCALE;
+  if (Mecanum_4_Bot.max_omega < YAW_MIN_OMEGA)
+  {
+    Mecanum_4_Bot.max_omega = YAW_MIN_OMEGA;
+  }
 
   // Doc joystick va chuan hoa
   mapped_x = (float)PS4_Dat.l_stick_x / 128.0f;
@@ -444,23 +453,67 @@ void Mecanum_Calculate(void)
   // PID giu goc neu bat (chi hoat dong khi khong co input xoay tu joystick)
   if (Mecanum_4_Bot.is_yaw_fix)
   {
-    // Neu nguoi dung dang chu dong xoay, uu tien input cua nguoi dung
-    if (fabsf(mapped_z) < 0.05f)
+    // Chi coi la xoay chu dong khi input xoay du lon va du lau
+    if (fabsf(mapped_z) < YAW_FIX_ROT_INPUT_DEADBAND)
     {
+      float yaw_corr_target = 0.0f;
+      yaw_manual_rotate_counter = 0;
       float shortest_err_deg = NormalizeAngleDeg((float)(Mecanum_4_Bot.fix_angle - Mecanum_4_Bot.IMU_theta));
       Mecanum_4_Bot.fix_angle = Mecanum_4_Bot.IMU_theta + shortest_err_deg;
       angle_error = fabsf(shortest_err_deg);
-      if (angle_error > 2.0f)
+      if (angle_error > YAW_FIX_ACTIVE_ERR_DEG)
       {
+        float yaw_boost = (angle_error > YAW_FIX_LARGE_ERR_DEG) ? YAW_FIX_LARGE_ERR_BOOST : YAW_FIX_NEAR_BOOST;
         PID_Compute(&Mecanum_Omega_PID);
         extern double Mecanum_Omega_PID_Out;
-        omg_cmd += (float)Mecanum_Omega_PID_Out * 1.5f;
+        yaw_corr_target = (float)Mecanum_Omega_PID_Out * yaw_boost;
+        yaw_deadband_latched = 0;
+      }
+      else
+      {
+        if (!yaw_deadband_latched)
+        {
+          PID_Init(&Mecanum_Omega_PID);
+          yaw_deadband_latched = 1;
+        }
+        yaw_corr_target = 0.0f;
+      }
+
+      {
+        float corr_diff = yaw_corr_target - yaw_corr_prev;
+        if (corr_diff > YAW_CORR_SLEW_PER_MS)
+          corr_diff = YAW_CORR_SLEW_PER_MS;
+        else if (corr_diff < -YAW_CORR_SLEW_PER_MS)
+          corr_diff = -YAW_CORR_SLEW_PER_MS;
+        yaw_corr_prev += corr_diff;
+      }
+      omg_cmd += yaw_corr_prev;
+    }
+    else if (fabsf(mapped_z) > YAW_FIX_ROT_INTENT_THRESH)
+    {
+      if (yaw_manual_rotate_counter < YAW_FIX_ROT_INTENT_HOLD_MS)
+      {
+        yaw_manual_rotate_counter++;
+      }
+
+      if (yaw_manual_rotate_counter >= YAW_FIX_ROT_INTENT_HOLD_MS)
+      {
+        Mecanum_4_Bot.fix_angle = -IMU.Yaw;
+        yaw_corr_prev = 0.0f;
+        yaw_deadband_latched = 0;
       }
     }
     else
     {
-      // Nguoi dung dang xoay chu dong, cap nhat fix_angle theo goc moi
-      Mecanum_4_Bot.fix_angle = -IMU.Yaw;
+      // Vung trung gian: coi la nhiu input xoay, giu nguyen goc khoa
+      yaw_manual_rotate_counter = 0;
+      if (yaw_corr_prev > YAW_CORR_SLEW_PER_MS)
+        yaw_corr_prev -= YAW_CORR_SLEW_PER_MS;
+      else if (yaw_corr_prev < -YAW_CORR_SLEW_PER_MS)
+        yaw_corr_prev += YAW_CORR_SLEW_PER_MS;
+      else
+        yaw_corr_prev = 0.0f;
+      omg_cmd += yaw_corr_prev;
     }
   }
 
@@ -475,26 +528,6 @@ void Mecanum_Calculate(void)
     int16_t cmd_m2 = ClampToInt16(-Mecanum_4_Bot.u[1] * WHEEL2_GAIN);
     int16_t cmd_m3 = ClampToInt16(-Mecanum_4_Bot.u[2] * WHEEL3_GAIN);
     int16_t cmd_m4 = ClampToInt16(-Mecanum_4_Bot.u[3] * WHEEL4_GAIN);
-
-    int16_t avg_others = (int16_t)((AbsInt16(cmd_m1) + AbsInt16(cmd_m2) + AbsInt16(cmd_m4)) / 3);
-    uint8_t m3_dropout_now = (AbsInt16(cmd_m3) <= M3_ZERO_THRESH) &&
-                             (AbsInt16(M3_Last_Good_Cmd) >= M3_LAST_GOOD_THRESH) &&
-                             (avg_others >= M3_OTHER_ACTIVE_THRESH);
-
-    if (m3_dropout_now && (M3_Dropout_Hold_Counter < M3_HOLD_MS))
-    {
-      cmd_m3 = M3_Last_Good_Cmd;
-      M3_Dropout_Hold_Counter++;
-      if (M3_Dropout_Hold_Counter == 1)
-      {
-        M3_Dropout_Events++;
-      }
-    }
-    else
-    {
-      M3_Dropout_Hold_Counter = 0;
-      M3_Last_Good_Cmd = cmd_m3;
-    }
 
     Wheel_Motors[0].Set_Point = cmd_m1;
     Wheel_Motors[1].Set_Point = cmd_m2;
