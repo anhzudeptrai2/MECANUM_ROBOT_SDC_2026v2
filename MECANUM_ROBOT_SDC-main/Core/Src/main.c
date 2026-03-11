@@ -72,7 +72,8 @@ Task_Timeout Task_TO[TASK_NUMS];
 uint16_t Timer_OVF_Flag_2 = 0;
 volatile uint8_t tick_1ms_flag = 0;
 volatile uint8_t ps4_req_flag = 0;
-volatile uint8_t motor_send_flag = 0;
+volatile uint8_t wheel_send_flag = 0;
+volatile uint8_t steering_send_flag = 0;
 
 // Robot Mecanum
 MRb Mecanum_4_Bot;
@@ -88,11 +89,33 @@ uint8_t Button_X_Active = 0;
 uint8_t Button_Circle_Active = 0;
 int8_t Robot_Direction = 1;
 uint8_t PS4_Ever_Connected = 0;
-uint8_t Button_UP_Active = 0;
-uint8_t Button_Strafe_Lock = 0;
 
 // Motor drivers
-Motor_Driver Wheel_Motors[4];
+#define WHEEL_MOTOR_COUNT 4
+#define STEERING_MOTOR_COUNT 2
+#define STEERING0_MASK 0x01u
+#define STEERING1_MASK 0x02u
+#define STEERING0_PRESET_COUNT 3
+Motor_Driver Wheel_Motors[WHEEL_MOTOR_COUNT];
+Motor_Driver Steering_Motors[STEERING_MOTOR_COUNT];
+
+volatile int16_t Steering_Target[STEERING_MOTOR_COUNT] = {0, 0};
+volatile int16_t Steering_Home_Target[STEERING_MOTOR_COUNT] = {0, 0};
+volatile uint8_t Steering_Dirty_Mask = 0;
+static const int16_t Steering0_Presets[3] = {-7000, -7500, -10220};
+volatile uint8_t Steering0_Preset_Index = 0;
+
+#define UP_DOUBLE_PRESS_MS 350
+#define RIGHT_MULTI_PRESS_MS 450
+#define TOUCHPAD_WHEEL_LOCK_MS 250
+#define STEERING_HOME_REQUEST_DELAY_MS 120
+#define STEERING_HOME_FIXED_ID5 0
+#define STEERING_HOME_FIXED_ID6 0
+volatile uint8_t Up_Click_Armed = 0;
+volatile uint32_t Up_Last_Click_Tick = 0;
+volatile uint8_t Right_Click_Count = 0;
+volatile uint32_t Right_Last_Click_Tick = 0;
+volatile uint32_t Wheel_Lock_Until_Tick = 0;
 
 // Buzzer
 struct
@@ -147,6 +170,100 @@ static void MPU_Config(void);
 /* USER CODE BEGIN 0 */
 void Robot_Hold_Stop(void);
 void HandleButtonPress(void);
+void Position_Motor_Update(void);
+static void Reset_Button_Sequences(void);
+
+static void Steering_SoftHome_FromReference(void)
+{
+  // Home co dinh: yeu cau driver tu tim moc home, khong lay vi tri hien tai lam zero.
+  Driver_Home_Request(Steering_Motors[0]);
+  HAL_Delay(STEERING_HOME_REQUEST_DELAY_MS);
+  Driver_Home_Request(Steering_Motors[1]);
+  HAL_Delay(STEERING_HOME_REQUEST_DELAY_MS);
+
+  Steering_Home_Target[0] = STEERING_HOME_FIXED_ID5;
+  Steering_Home_Target[1] = STEERING_HOME_FIXED_ID6;
+  Steering_Target[0] = Steering_Home_Target[0];
+  Steering_Target[1] = Steering_Home_Target[1];
+  Steering0_Preset_Index = 0;
+  Reset_Button_Sequences();
+
+  Wheel_Lock_Until_Tick = HAL_GetTick() + TOUCHPAD_WHEEL_LOCK_MS;
+  prev_vx_cmd = 0.0f;
+  prev_vy_cmd = 0.0f;
+  prev_omg_cmd = 0.0f;
+
+  Position_Motor_Update();
+  Steering_Dirty_Mask |= (STEERING0_MASK | STEERING1_MASK);
+}
+
+static void Steering_RequestTarget(uint8_t motor_idx, int16_t target)
+{
+  if (motor_idx >= STEERING_MOTOR_COUNT)
+  {
+    return;
+  }
+
+  Steering_Target[motor_idx] = target;
+  Steering_Dirty_Mask |= (uint8_t)(1u << motor_idx);
+}
+
+static void Reset_Button_Sequences(void)
+{
+  Right_Click_Count = 0;
+  Up_Click_Armed = 0;
+}
+
+static void Handle_Right_MultiPress(void)
+{
+  uint32_t now_tick = HAL_GetTick();
+
+  if ((now_tick - Right_Last_Click_Tick) <= RIGHT_MULTI_PRESS_MS)
+  {
+    if (Right_Click_Count < 2u)
+    {
+      Right_Click_Count++;
+    }
+  }
+  else
+  {
+    Right_Click_Count = 1;
+  }
+
+  Right_Last_Click_Tick = now_tick;
+  if (Right_Click_Count <= 1u)
+  {
+    Steering0_Preset_Index = 0u; // muc be nhat
+  }
+  else
+  {
+    Steering0_Preset_Index = 1u; // muc be thu 2
+    Right_Click_Count = 0u;
+  }
+
+  Steering_RequestTarget(0, Steering0_Presets[Steering0_Preset_Index]);
+
+  Buzzer_Beep(50);
+}
+
+static void Handle_Up_DoublePress(void)
+{
+  uint32_t now_tick = HAL_GetTick();
+
+  if (Up_Click_Armed && ((now_tick - Up_Last_Click_Tick) <= UP_DOUBLE_PRESS_MS))
+  {
+    Steering_RequestTarget(1, 650);
+    Up_Click_Armed = 0;
+    Buzzer_Beep(120);
+  }
+  else
+  {
+    Steering_RequestTarget(1, 300);
+    Up_Click_Armed = 1;
+    Up_Last_Click_Tick = now_tick;
+    Buzzer_Beep(80);
+  }
+}
 
 static float NormalizeAngleDeg(float angle_deg)
 {
@@ -188,12 +305,12 @@ void Set_LED_State(LED_TypeDef led, GPIO_PinState state)
 
 void Buzzer_Beep(uint16_t duration_ms)
 {
-  if (!Buzzer.active)
+  if(!Buzzer.active)
   {
     Buzzer.active = 1;
     Buzzer.duration = duration_ms;
     Buzzer.counter = 0;
-    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
   }
 }
 
@@ -204,7 +321,7 @@ void Buzzer_Update(void)
     Buzzer.counter++;
     if (Buzzer.counter >= Buzzer.duration)
     {
-      HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_SET);
       Buzzer.active = 0;
       Buzzer.counter = 0;
     }
@@ -233,8 +350,33 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 void Robot_Hold_Stop(void)
 {
-  for (int i = 0; i < 4; i++)
+  for (int i = 0; i < WHEEL_MOTOR_COUNT; i++)
     Wheel_Motors[i].Set_Point = 0;
+}
+
+void Position_Motor_Update(void)
+{
+  for (uint8_t i = 0; i < STEERING_MOTOR_COUNT; i++)
+  {
+    Steering_Motors[i].Set_Point = Steering_Target[i];
+  }
+}
+
+HAL_StatusTypeDef Steering_Send_Queued(void)
+{
+  if (steering_send_flag != 0u)
+  {
+    return HAL_BUSY;
+  }
+
+  HAL_StatusTypeDef st = Driver_Send_Setpoints_U2(Steering_Motors, STEERING_MOTOR_COUNT);
+  if (st == HAL_OK)
+  {
+    steering_send_flag = 1;
+    Steering_Dirty_Mask = 0;
+  }
+
+  return st;
 }
 
 /*------------------------------------UART Tx Rx IT Handle--------------------------------------*/
@@ -242,7 +384,13 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART3)
   {
-    motor_send_flag = 0;
+    wheel_send_flag = 0;
+  }
+  if (huart->Instance == UART5)
+  {
+    steering_send_flag = 0;
+    // Stream lien tuc steering setpoint de tranh mat lenh khi bam nut.
+    (void)Steering_Send_Queued();
   }
 }
 
@@ -279,6 +427,16 @@ void HandleButtonPress(void)
     else
     {
       Button_Debounce_Counter = 0;
+
+      // Huy chuoi nhan neu da vuot cua so thoi gian de tranh dinh trang thai cu.
+      if ((Right_Click_Count != 0u) && ((HAL_GetTick() - Right_Last_Click_Tick) > RIGHT_MULTI_PRESS_MS))
+      {
+        Right_Click_Count = 0;
+      }
+      if (Up_Click_Armed && ((HAL_GetTick() - Up_Last_Click_Tick) > UP_DOUBLE_PRESS_MS))
+      {
+        Up_Click_Armed = 0;
+      }
     }
     break;
 
@@ -299,8 +457,10 @@ void HandleButtonPress(void)
     break;
 
   case BUTTON_RELEASED:
-    if (Last_Button == BUTTON_CROSS)
+    // Theo code mau: xu ly theo nut don le de tranh kich nham khi co combo/noise bitmask.
+    switch (Last_Button)
     {
+    case BUTTON_CROSS:
       Button_X_Active = !Button_X_Active;
       if (Button_X_Active)
       {
@@ -308,7 +468,6 @@ void HandleButtonPress(void)
         Mecanum_4_Bot.is_yaw_fix = 1;
         PID_Init(&Mecanum_Omega_PID);
         Button_Circle_Active = 0;
-        Button_Strafe_Lock = 0;
         Buzzer_Beep(100);
       }
       else
@@ -316,29 +475,67 @@ void HandleButtonPress(void)
         Mecanum_4_Bot.is_yaw_fix = 0;
         Buzzer_Beep(50);
       }
-    }
-    else if (Last_Button == BUTTON_TRIANGLE)
-    {
+      break;
+
+    case BUTTON_TRIANGLE:
       Robot_Reset_Home = 1;
       Button_X_Active = 0;
       Button_Circle_Active = 0;
-      Button_Strafe_Lock = 0;
       Mecanum_4_Bot.is_yaw_fix = 0;
       Buzzer_Beep(150);
-    }
-    else if (Last_Button == BUTTON_L1)
-    {
+      break;
+
+    case BUTTON_L1:
+      // Home = vi tri startup khi vua bat nguon
+      Steering_RequestTarget(0, Steering_Home_Target[0]);
+      Steering_RequestTarget(1, Steering_Home_Target[1]);
+      Steering0_Preset_Index = 0;
+      Reset_Button_Sequences();
+      Wheel_Lock_Until_Tick = HAL_GetTick() + TOUCHPAD_WHEEL_LOCK_MS;
+      Robot_Hold_Stop();
+      prev_vx_cmd = 0.0f;
+      prev_vy_cmd = 0.0f;
+      prev_omg_cmd = 0.0f;
+      Buzzer_Beep(80);
+      break;
+
+    case BUTTON_LEFT:
+      Steering0_Preset_Index = (STEERING0_PRESET_COUNT - 1u); // muc lon nhat
+      Steering_RequestTarget(0, Steering0_Presets[Steering0_Preset_Index]);
+      Right_Click_Count = 0;
+      Buzzer_Beep(50);
+      break;
+
+    case BUTTON_RIGHT:
+      Handle_Right_MultiPress();
+      break;
+
+    case BUTTON_UP:
+      Handle_Up_DoublePress();
+      break;
+
+    case BUTTON_DOWN:
+      Steering_RequestTarget(1, -300);
+      Buzzer_Beep(50);
+      break;
+
+    case BUTTON_TOUCHPAD:
       Robot_Direction = -Robot_Direction;
       Buzzer_Beep(80);
-    }
-    else if (Last_Button == BUTTON_SQUARE)
-    {
+      break;
+
+    case BUTTON_SQUARE:
       Buzzer_Beep(50);
-    }
-    else if (Last_Button == BUTTON_OPTIONS)
-    {
+      break;
+
+    case BUTTON_OPTIONS:
       Buzzer_Beep(50);
+      break;
+
+    default:
+      break;
     }
+
     Last_Button = BUTTON_NONE;
     Button_Hold_State = BUTTON_IDLE;
     Button_Debounce_Counter = 0;
@@ -363,6 +560,15 @@ void PS4_Process(void)
 // Tinh toan dong hoc Mecanum
 void Mecanum_Calculate(void)
 {
+  if ((int32_t)(Wheel_Lock_Until_Tick - HAL_GetTick()) > 0)
+  {
+    Robot_Hold_Stop();
+    prev_vx_cmd = 0.0f;
+    prev_vy_cmd = 0.0f;
+    prev_omg_cmd = 0.0f;
+    return;
+  }
+
   float mapped_x, mapped_y, mapped_z;
   float vx_cmd, vy_cmd, omg_cmd;
   float angle_error;
@@ -402,25 +608,6 @@ void Mecanum_Calculate(void)
   vx_cmd = mapped_y * Mecanum_4_Bot.max_speed * Robot_Direction;
   vy_cmd = mapped_x * Mecanum_4_Bot.max_speed * Robot_Direction;
   omg_cmd = -mapped_z * Mecanum_4_Bot.max_omega;
-
-  // Xu ly nut RIGHT/LEFT: chi di ngang, KHONG tu bat/tat khoa goc
-  if (Button_State & BUTTON_RIGHT)
-  {
-    vy_cmd = Mecanum_4_Bot.max_speed * 0.7f;
-    Button_Strafe_Lock = 1;
-  }
-  else if (Button_State & BUTTON_LEFT)
-  {
-    vy_cmd = -Mecanum_4_Bot.max_speed * 0.7f;
-    Button_Strafe_Lock = 1;
-  }
-  else
-  {
-    if (Button_Strafe_Lock)
-    {
-      Button_Strafe_Lock = 0;
-    }
-  }
 
   // Gioi han gia toc
   vx_diff = vx_cmd - prev_vx_cmd;
@@ -522,18 +709,15 @@ void Mecanum_Calculate(void)
   // Tinh dong hoc Mecanum
   MecanumRobot_SetMotion(&Mecanum_4_Bot, vx_cmd, vy_cmd, omg_cmd, IMU.Yaw, 0);
 
-  if (!Button_UP_Active)
-  {
-    int16_t cmd_m1 = ClampToInt16(Mecanum_4_Bot.u[0] * WHEEL1_GAIN);
-    int16_t cmd_m2 = ClampToInt16(-Mecanum_4_Bot.u[1] * WHEEL2_GAIN);
-    int16_t cmd_m3 = ClampToInt16(-Mecanum_4_Bot.u[2] * WHEEL3_GAIN);
-    int16_t cmd_m4 = ClampToInt16(-Mecanum_4_Bot.u[3] * WHEEL4_GAIN);
+  int16_t cmd_m1 = ClampToInt16(Mecanum_4_Bot.u[0] * WHEEL1_GAIN);
+  int16_t cmd_m2 = ClampToInt16(-Mecanum_4_Bot.u[1] * WHEEL2_GAIN);
+  int16_t cmd_m3 = ClampToInt16(-Mecanum_4_Bot.u[2] * WHEEL3_GAIN);
+  int16_t cmd_m4 = ClampToInt16(-Mecanum_4_Bot.u[3] * WHEEL4_GAIN);
 
-    Wheel_Motors[0].Set_Point = cmd_m1;
-    Wheel_Motors[1].Set_Point = cmd_m2;
-    Wheel_Motors[2].Set_Point = cmd_m3;
-    Wheel_Motors[3].Set_Point = cmd_m4;
-  }
+  Wheel_Motors[0].Set_Point = cmd_m1;
+  Wheel_Motors[1].Set_Point = cmd_m2;
+  Wheel_Motors[2].Set_Point = cmd_m3;
+  Wheel_Motors[3].Set_Point = cmd_m4;
 }
 
 // Cap nhat motor
@@ -569,21 +753,26 @@ void Motor_Update(void)
     }
   }
 
-  if (motor_send_flag == 0)
+  if (wheel_send_flag == 0)
   {
-    if (Driver_Send_Setpoints_U1(Wheel_Motors, 4) == HAL_OK)
+    if (Driver_Send_Setpoints_U1(Wheel_Motors, WHEEL_MOTOR_COUNT) == HAL_OK)
     {
-      motor_send_flag = 1;
+      wheel_send_flag = 1;
     }
+  }
+
+  if (steering_send_flag == 0)
+  {
+    (void)Steering_Send_Queued();
   }
 }
 
 /* USER CODE END 0 */
 
 /**
- * @brief  The application entry point.
- * @retval int
- */
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
 
@@ -621,6 +810,7 @@ int main(void)
   MX_TIM16_Init();
   MX_TIM17_Init();
   MX_USART2_UART_Init();
+  MX_UART5_Init();
   /* USER CODE BEGIN 2 */
 
   // Khoi tao PS4
@@ -635,11 +825,26 @@ int main(void)
 
   // Khoi tao Motor drivers
   Driver_PID_AML_Init_UART(&huart3, Wheel_Motors);
+  Driver_PID_AML_Init_UART(&huart5, Steering_Motors);
+  for (uint8_t i = 0; i < WHEEL_MOTOR_COUNT; i++)
+  {
+    Wheel_Motors[i].Driver_UART = &huart3;
+  }
+  for (uint8_t i = 0; i < STEERING_MOTOR_COUNT; i++)
+  {
+    Steering_Motors[i].Driver_UART = &huart5;
+  }
   Assign_PID_AML_Id(&Wheel_Motors[0], 1);
   Assign_PID_AML_Id(&Wheel_Motors[1], 2);
   Assign_PID_AML_Id(&Wheel_Motors[2], 3);
   Assign_PID_AML_Id(&Wheel_Motors[3], 4);
-  (void)Driver_Send_Setpoints_U1(Wheel_Motors, 4);
+  Assign_PID_AML_Id(&Steering_Motors[0], 5);
+  Assign_PID_AML_Id(&Steering_Motors[1], 6);
+
+  Steering_SoftHome_FromReference();
+
+  (void)Driver_Send_Setpoints_U1(Wheel_Motors, WHEEL_MOTOR_COUNT);
+  (void)Steering_Send_Queued();
 
   // Khoi tao Timeout Timer
   Timeout_Begin();
@@ -655,11 +860,12 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /*----------------------------XỬ LÝ RESET IMU HOME----------------------------*/
+    /*----------------------------XU LY RESET GOC IMU----------------------------*/
     if (Robot_Reset_Home)
     {
       Robot_Reset_Home = 0;
       WT901C_Reset_Angles(&IMU);
+      Buzzer_Beep(120);
     }
     /*----------------------------MAIN LOOP - X\u1eeaL L\u00dd THEO FLAG----------------------------*/
     /* Ch\u1ec9 x\u1eed l\u00fd khi c\u00f3 flag t\u1eeb timer interrupt */
@@ -674,6 +880,7 @@ int main(void)
       Mecanum_Calculate();
 
       /* 3. C\u1eadp nh\u1eadt motor (bao g\u1ed3m timeout check) */
+      Position_Motor_Update();
       Motor_Update();
     }
   }
@@ -681,29 +888,27 @@ int main(void)
 }
 
 /**
- * @brief System Clock Configuration
- * @retval None
- */
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   /** Supply configuration update enable
-   */
+  */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
   /** Configure the main internal regulator output voltage
-   */
+  */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
 
-  while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY))
-  {
-  }
+  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
   /** Initializes the RCC Oscillators according to the specified parameters
-   * in the RCC_OscInitTypeDef structure.
-   */
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -722,8 +927,10 @@ void SystemClock_Config(void)
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
@@ -742,7 +949,7 @@ void SystemClock_Config(void)
 
 /* USER CODE END 4 */
 
-/* MPU Configuration */
+ /* MPU Configuration */
 
 void MPU_Config(void)
 {
@@ -752,7 +959,7 @@ void MPU_Config(void)
   HAL_MPU_Disable();
 
   /** Initializes and configures the Region and the memory to be protected
-   */
+  */
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
@@ -768,12 +975,13 @@ void MPU_Config(void)
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+
 }
 
 /**
- * @brief  This function is executed in case of error occurrence.
- * @retval None
- */
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -786,12 +994,12 @@ void Error_Handler(void)
 }
 #ifdef USE_FULL_ASSERT
 /**
- * @brief  Reports the name of the source file and the source line number
- *         where the assert_param error has occurred.
- * @param  file: pointer to the source file name
- * @param  line: assert_param error line source number
- * @retval None
- */
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
