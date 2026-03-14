@@ -905,6 +905,7 @@ int main(void)
         action_done_flag = 0;
         Swerve_Robot.Is_Auto = 0;
         Is_Moving_Waypoints = 0;
+
         Arm_Relese_Ball();
         Arm_Standby_Pick();
       }

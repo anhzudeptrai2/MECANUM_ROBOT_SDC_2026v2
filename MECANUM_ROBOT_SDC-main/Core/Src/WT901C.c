@@ -23,6 +23,8 @@ static float Yaw_Continuous_Angle = 0.0f;
 static int16_t Yaw_Roll_Count = 0;
 static float Prev_Yaw_Angle = 0.0f;
 static float offset_angle = 0.0f;
+static uint8_t yaw_initialized = 0;
+static uint8_t yaw_zero_pending = 1;
 
 #ifdef TTL_MODE
 /**
@@ -46,6 +48,14 @@ static uint8_t computeChecksum(const uint8_t *frame, uint8_t length)
  */
 static void Infinite_Yaw(float current_angle)
 {
+    if (!yaw_initialized)
+    {
+        Prev_Yaw_Angle = current_angle;
+        Yaw_Continuous_Angle = current_angle;
+        yaw_initialized = 1;
+        return;
+    }
+
     float delta = current_angle - Prev_Yaw_Angle;
     if (delta > 180.0f)
         Yaw_Roll_Count--;
@@ -67,7 +77,6 @@ void WT901C_Init(WT901C *imu, UART_HandleTypeDef *wt901_uart)
     HAL_Delay(1000);
     WT901C_Reset_Angles(imu);
     HAL_Delay(100);
-    WT901C_Begin_Recieve(imu);
 }
 
 void WT901C_Reset_Angles(WT901C *imu)
@@ -84,11 +93,13 @@ void WT901C_Reset_Angles(WT901C *imu)
     HAL_UART_Transmit_DMA(imu->WT901C_UART, (uint8_t *)tx_angle_rst_buffer, ANGLE_RESET_BUFFER_SIZE);
 #endif
 
-    // Cập nhật lại offset và reset các biến liên quan đến yaw
-    offset_angle = Yaw_Continuous_Angle;
+    // Reset bo loc yaw, dat moc zero tai frame hop le dau tien sau reset
+    offset_angle = 0.0f;
     Yaw_Roll_Count = 0;
     Prev_Yaw_Angle = 0.0f;
     Yaw_Continuous_Angle = 0.0f;
+    yaw_initialized = 0;
+    yaw_zero_pending = 1;
     imu->Yaw = imu->Roll = imu->Pitch = 0.0f;
 
     WT901C_Begin_Recieve(imu);
@@ -161,6 +172,11 @@ void WT901C_Process_Buffer(WT901C *imu, uint8_t *buffer, uint16_t length)
                 imu->Pitch = ((int16_t)((tempBuffer[i + 5] << 8) | tempBuffer[i + 6])) * (180.0f / 32768.0f);
                 float currentYaw = ((int16_t)((tempBuffer[i + 7] << 8) | tempBuffer[i + 8])) * (180.0f / 32768.0f);
                 Infinite_Yaw(currentYaw);
+                if (yaw_zero_pending)
+                {
+                    offset_angle = Yaw_Continuous_Angle;
+                    yaw_zero_pending = 0;
+                }
                 imu->Yaw = Yaw_Continuous_Angle - offset_angle;
                 i += FRAME_LEN;
                 continue;
@@ -182,8 +198,24 @@ void WT901C_Process_Buffer(WT901C *imu, uint8_t *buffer, uint16_t length)
  */
 void WT901C_UART_Rx_IDLE_Hanlde(WT901C *imu)
 {
-    WT901C_Process_Buffer(imu, rx_buffer_imu, RX_BUFFER_SIZE);
+    uint16_t rx_length = RX_BUFFER_SIZE;
+
+    if ((imu != NULL) && (imu->WT901C_UART != NULL) && (imu->WT901C_UART->hdmarx != NULL))
+    {
+        uint32_t remain = __HAL_DMA_GET_COUNTER(imu->WT901C_UART->hdmarx);
+        if (remain <= RX_BUFFER_SIZE)
+        {
+            rx_length = (uint16_t)(RX_BUFFER_SIZE - remain);
+        }
+    }
+
+    if (rx_length > 0u)
+    {
+        WT901C_Process_Buffer(imu, (uint8_t *)rx_buffer_imu, rx_length);
+    }
+
 #ifdef TTL_MODE
+    memset((void *)rx_buffer_imu, 0, sizeof(rx_buffer_imu));
     WT901C_Start_Receive(imu);
 #endif
 }

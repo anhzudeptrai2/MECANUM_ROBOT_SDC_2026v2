@@ -1281,10 +1281,9 @@ ARM Macro Assembler    Page 20
 Command Line: --debug --xref --diag_suppress=9931 --cpu=Cortex-M7.fp.dp --apcs=
 interwork --depend=ps4+stm32+esp\startup_stm32h743xx.d -ops4+stm32+esp\startup_
 stm32h743xx.o -I.\RTE\_PS4_STM32_ESP -IC:\Users\Admin\AppData\Local\Arm\Packs\A
-RM\CMSIS\6.1.0\CMSIS\Core\Include --predefine="__EVAL SETA 1" --predefine="__UV
-ISION_VERSION SETA 531" --predefine="_RTE_ SETA 1" --predefine="STM32H743xx SET
-A 1" --predefine="_RTE_ SETA 1" --list=startup_stm32h743xx.lst startup_stm32h74
-3xx.s
+RM\CMSIS\5.7.0\CMSIS\Core\Include --predefine="__UVISION_VERSION SETA 531" --pr
+edefine="_RTE_ SETA 1" --predefine="STM32H743xx SETA 1" --predefine="_RTE_ SETA
+ 1" --list=startup_stm32h743xx.lst startup_stm32h743xx.s
 
 
 
@@ -2973,4 +2972,4 @@ Symbol: __use_two_region_memory
       None
 Comment: __use_two_region_memory unused
 4 symbols
-508 symbols in table
+507 symbols in table

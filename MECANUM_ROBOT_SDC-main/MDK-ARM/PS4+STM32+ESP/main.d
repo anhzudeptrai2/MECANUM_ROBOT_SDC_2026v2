@@ -48,3 +48,4 @@ ps4+stm32+esp\main.o: C:\Keil_v5\ARM\ARMCC\Bin\..\include\stdlib.h
 ps4+stm32+esp\main.o: ../Core/Inc/TIMER_TIMEOUT.h
 ps4+stm32+esp\main.o: ../Core/Inc/MECANUM_FIELD_KIN.h
 ps4+stm32+esp\main.o: ../Core/Inc/WT901C.h
+ps4+stm32+esp\main.o: ../Core/Inc/ROBOT_ACCELERATION.h

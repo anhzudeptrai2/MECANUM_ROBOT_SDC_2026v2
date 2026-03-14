@@ -2,10 +2,10 @@
 
 /* PID tuning for yaw-hold (omega control) */
 double Mecanum_Omega_PID_Out;
-static double Mecanum_Kp_Omega = 0.90f;
-static double Mecanum_Ki_Omega = 0.0020f;
-static double Mecanum_Kd_Omega = 0.024f;
-static double Mecanum_Speed_Omega_PID = 0.78f;
+static double Mecanum_Kp_Omega = 1.18f;
+static double Mecanum_Ki_Omega = 0.0022f;
+static double Mecanum_Kd_Omega = 0.050f;
+static double Mecanum_Speed_Omega_PID = 1.25f;
 #define ANGLE_DEADBAND 5.0f // Deadband 5 độ để tránh nhiễu IMU
 
 extern PID_TypeDef Mecanum_Omega_PID;
@@ -207,14 +207,7 @@ void MecanumRobot_SetMotion(MRb *robot, float vx, float vy, float omega, float i
         robot->theta = imu_theta_deg * (PI / 180.0f);
     }
 
-    if (robot->theta > 2.0f * PI)
-    {
-        robot->theta -= 2.0f * PI;
-    }
-    else if (robot->theta < 0.0f)
-    {
-        robot->theta += 2.0f * PI;
-    }
+    robot->theta = normalize_angle_rad(robot->theta);
 
     robot->theta = -robot->theta;
 
@@ -245,16 +238,10 @@ void MecanumRobot_Field_Control(MRb *robot, PS4_DATA *ps4_joy, float imu_theta, 
         robot->theta = imu_theta * (PI / 180.0f);
     }
 
-    if (robot->theta > 2.0f * PI)
-    {
-        robot->theta -= 2.0f * PI;
-    }
-    else if (robot->theta < 0.0f)
-    {
-        robot->theta += 2.0f * PI;
-    }
+    robot->theta = normalize_angle_rad(robot->theta);
 
     robot->theta = -robot->theta;
 
     MecanumRobot_CalculateWheelSpeeds(robot, &robot->u[0], &robot->u[1], &robot->u[2], &robot->u[3]);
 }
+

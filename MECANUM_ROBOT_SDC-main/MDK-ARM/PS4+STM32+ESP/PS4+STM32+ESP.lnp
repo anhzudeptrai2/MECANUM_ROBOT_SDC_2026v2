@@ -7,6 +7,7 @@
 "ps4+stm32+esp\timer_timeout.o"
 "ps4+stm32+esp\wt901c.o"
 "ps4+stm32+esp\crc_16.o"
+"ps4+stm32+esp\robot_acceleration.o"
 "ps4+stm32+esp\main.o"
 "ps4+stm32+esp\gpio.o"
 "ps4+stm32+esp\dma.o"

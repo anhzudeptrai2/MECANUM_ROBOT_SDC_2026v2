@@ -32,6 +32,7 @@
 #include "TIMER_TIMEOUT.h"
 #include "MECANUM_FIELD_KIN.h"
 #include "WT901C.h"
+#include "ROBOT_ACCELERATION.h"
 
 /* USER CODE END Includes */
 
@@ -70,7 +71,7 @@ volatile uint8_t Button_Debounce_Counter = 0;
 // Timeout va Flags
 Task_Timeout Task_TO[TASK_NUMS];
 uint16_t Timer_OVF_Flag_2 = 0;
-volatile uint8_t tick_1ms_flag = 0;
+volatile uint16_t tick_1ms_pending = 0;
 volatile uint8_t ps4_req_flag = 0;
 volatile uint8_t wheel_send_flag = 0;
 volatile uint8_t steering_send_flag = 0;
@@ -102,7 +103,8 @@ Motor_Driver Steering_Motors[STEERING_MOTOR_COUNT];
 volatile int16_t Steering_Target[STEERING_MOTOR_COUNT] = {0, 0};
 volatile int16_t Steering_Home_Target[STEERING_MOTOR_COUNT] = {0, 0};
 volatile uint8_t Steering_Dirty_Mask = 0;
-static const int16_t Steering0_Presets[3] = {-7000, -7500, -10220};
+static const int16_t Steering0_Presets[3] = {8400, 13000, 18500};
+static const int16_t Steering0_OpenPresets[3] = {7000, 10000, 15500};
 volatile uint8_t Steering0_Preset_Index = 0;
 
 #define UP_DOUBLE_PRESS_MS 350
@@ -111,12 +113,26 @@ volatile uint8_t Steering0_Preset_Index = 0;
 #define STEERING_HOME_REQUEST_DELAY_MS 120
 #define STEERING_HOME_FIXED_ID5 0
 #define STEERING_HOME_FIXED_ID6 0
+#define LS_HOME_ID5_DEBOUNCE_MS 20u
+#define LS_HOME_ID5_ACTIVE_STATE GPIO_PIN_RESET
+#define STEERING_ID5_HOME_SEEK_TARGET (-28000)
 volatile uint8_t Up_Click_Armed = 0;
 volatile uint32_t Up_Last_Click_Tick = 0;
 volatile uint8_t Right_Click_Count = 0;
 volatile uint32_t Right_Last_Click_Tick = 0;
 volatile uint32_t Wheel_Lock_Until_Tick = 0;
-
+volatile uint8_t LS_Home_Id5_Stop_Request = 0;
+volatile uint8_t LS_Home_Id5_Homing_Armed = 0;
+volatile uint32_t LS_Home_Id5_Last_Tick = 0;
+volatile uint8_t DBG_LS_Id5_PinState = 0u;
+volatile uint8_t DBG_LS_Id5_HomingArmed = 0u;
+volatile uint8_t DBG_LS_Id5_Pending = 0u;
+volatile uint8_t DBG_LS_Id5_StopReq = 0u;
+volatile uint8_t DBG_PS4_ButtonState = 0u;
+volatile uint8_t DBG_PS4_LastButton = 0u;
+volatile uint8_t DBG_L1_Home_Request_Count = 0u;
+volatile uint8_t DBG_LS_Id5_EXTI_Count = 0u;
+volatile uint8_t DBG_LS_Id5_Latched_Count = 0u;
 // Buzzer
 struct
 {
@@ -124,6 +140,9 @@ struct
   uint16_t duration;
   uint16_t counter;
 } Buzzer = {0};
+
+RobotAcceleration Wheel_Acceleration[WHEEL_MOTOR_COUNT];
+RobotAcceleration Steering_Acceleration[STEERING_MOTOR_COUNT];
 
 float prev_vx_cmd = 0.0f;
 float prev_vy_cmd = 0.0f;
@@ -141,21 +160,36 @@ typedef enum
 #define SLEW_VX_PER_MS 0.008f
 #define SLEW_VY_PER_MS 0.008f
 #define SLEW_OMG_PER_MS 0.008f
+#define CONTROL_DT_SEC 0.001f
+#define WHEEL_ACCEL_DURATION_SEC 0.18f
+#define STEERING_ACCEL_DURATION_SEC 0.15f
+#define STEERING_REFRESH_MS 20u
 #define WHEEL1_GAIN 1.00f
 #define WHEEL2_GAIN 0.68f
 #define WHEEL3_GAIN 1.00f
 #define WHEEL4_GAIN 1.00f
 
 #define YAW_SPEED_SCALE 1.5f
-#define YAW_FIX_ACTIVE_ERR_DEG 1.0f
 #define YAW_FIX_ROT_INPUT_DEADBAND 0.04f
 #define YAW_FIX_ROT_INTENT_THRESH 0.20f
 #define YAW_FIX_ROT_INTENT_HOLD_MS 40
+#define YAW_FIX_ENGAGE_ERR_DEG 1.8f
+#define YAW_FIX_RELEASE_ERR_DEG 0.55f
+#define YAW_FIX_STILL_SPEED_THRESH 0.08f
+#define YAW_FIX_STILL_MAX_CORR 0.18f
+#define YAW_FIX_MOVE_MAX_CORR 0.58f
+#define YAW_FIX_FAST_ERR_START_DEG 8.0f
+#define YAW_FIX_FAST_ERR_FULL_DEG 40.0f
+#define YAW_FIX_FAST_MAX_CORR_RATIO 0.88f
+#define YAW_FIX_KS_START_DEG 5.5f
+#define YAW_FIX_KS_FULL_DEG 30.0f
+#define YAW_FIX_KS_MIN 0.03f
+#define YAW_FIX_KS_MAX 0.14f
+#define YAW_FIX_DWELL_MS 45u
 #define YAW_MIN_OMEGA 1.0f
-#define YAW_FIX_LARGE_ERR_DEG 8.0f
-#define YAW_FIX_LARGE_ERR_BOOST 1.15f
-#define YAW_FIX_NEAR_BOOST 1.00f
-#define YAW_CORR_SLEW_PER_MS 0.010f
+#define YAW_CORR_SLEW_PER_MS 0.006f
+#define YAW_CORR_SLEW_BOOST_PER_MS 0.012f
+#define YAW_CORR_DECAY_PER_MS 0.003f
 
 /* USER CODE END PV */
 
@@ -171,13 +205,61 @@ static void MPU_Config(void);
 void Robot_Hold_Stop(void);
 void HandleButtonPress(void);
 void Position_Motor_Update(void);
+void Buzzer_Beep(uint16_t duration_ms);
 static void Reset_Button_Sequences(void);
+static void Steering_Id5_LimitStop_RequestFromIsr(void);
+static void Steering_Id5_LimitHome_Process(void);
+static void Steering_Id5_LimitLevel_Monitor(void);
+static void Handle_R1_OpenGrip_Request(void);
+static uint8_t LS_Home_Id5_IsClosed(void);
+static void LS_Id5_RequestStop(void);
+static void Debug_Snapshot_Update(void);
+static uint8_t LS_Home_Id5_IsClosed(void)
+{
+  GPIO_PinState pin_state = HAL_GPIO_ReadPin(LS_HOME_ID5_GPIO_Port, LS_HOME_ID5_Pin);
+  DBG_LS_Id5_PinState = (uint8_t)pin_state;
+  return (pin_state == LS_HOME_ID5_ACTIVE_STATE) ? 1u : 0u;
+}
+
+static void LS_Id5_RequestStop(void)
+{
+  if (LS_Home_Id5_Stop_Request == 0u)
+  {
+    DBG_LS_Id5_Latched_Count++;
+  }
+
+  LS_Home_Id5_Stop_Request = 1u;
+  DBG_LS_Id5_StopReq = LS_Home_Id5_Stop_Request;
+}
+
+static void Debug_Snapshot_Update(void)
+{
+  DBG_LS_Id5_PinState = (uint8_t)HAL_GPIO_ReadPin(LS_HOME_ID5_GPIO_Port, LS_HOME_ID5_Pin);
+  DBG_LS_Id5_HomingArmed = LS_Home_Id5_Homing_Armed;
+  DBG_LS_Id5_Pending = LS_Home_Id5_Stop_Request;
+  DBG_LS_Id5_StopReq = LS_Home_Id5_Stop_Request;
+  DBG_PS4_ButtonState = (uint8_t)(((uint16_t)Button_State) & 0xFFu);
+  DBG_PS4_LastButton = (uint8_t)(((uint16_t)Last_Button) & 0xFFu);
+}
+
+static void Steering_Id5_LimitLevel_Monitor(void)
+{
+  if ((LS_Home_Id5_Homing_Armed != 0u) && (LS_Home_Id5_IsClosed() != 0u))
+  {
+    LS_Id5_RequestStop();
+  }
+}
 
 static void Steering_SoftHome_FromReference(void)
 {
-  // Home co dinh: yeu cau driver tu tim moc home, khong lay vi tri hien tai lam zero.
-  Driver_Home_Request(Steering_Motors[0]);
+  LS_Home_Id5_Stop_Request = 0u;
+  LS_Home_Id5_Homing_Armed = 0u;
+
+  // Home ID5 = vi tri thuc te tai thoi diem bat nguon.
+  Driver_Set_Zero_Position(Steering_Motors[0]);
   HAL_Delay(STEERING_HOME_REQUEST_DELAY_MS);
+
+  // ID6 van giu quy trinh home hien tai
   Driver_Home_Request(Steering_Motors[1]);
   HAL_Delay(STEERING_HOME_REQUEST_DELAY_MS);
 
@@ -202,6 +284,14 @@ static void Steering_RequestTarget(uint8_t motor_idx, int16_t target)
   if (motor_idx >= STEERING_MOTOR_COUNT)
   {
     return;
+  }
+
+  // Lenh tay (khong phai home target/seek target) se huy che do homing ID5.
+  if ((motor_idx == 0u) &&
+      (target != Steering_Home_Target[0]) &&
+      (target != STEERING_ID5_HOME_SEEK_TARGET))
+  {
+    LS_Home_Id5_Homing_Armed = 0u;
   }
 
   Steering_Target[motor_idx] = target;
@@ -262,6 +352,107 @@ static void Handle_Up_DoublePress(void)
     Up_Click_Armed = 1;
     Up_Last_Click_Tick = now_tick;
     Buzzer_Beep(80);
+  }
+}
+static void Handle_L1_Home_Request(void)
+{
+  LS_Home_Id5_Homing_Armed = 1u;
+
+  // ID6 van quay ve moc home co dinh.
+  Steering_RequestTarget(1, Steering_Home_Target[1]);
+
+  LS_Home_Id5_Stop_Request = 0u;
+  DBG_L1_Home_Request_Count++;
+
+  if (LS_Home_Id5_IsClosed() != 0u)
+  {
+    // Cong tac da dong (0): dung ngay va chot home.
+    LS_Id5_RequestStop();
+  }
+  else
+  {
+    // Chua cham cong tac: quay ID5 theo chieu nguoc setpoint kep cho den khi cham LS.
+    Steering_RequestTarget(0, STEERING_ID5_HOME_SEEK_TARGET);
+  }
+
+  Steering0_Preset_Index = 0;
+  Reset_Button_Sequences();
+  Wheel_Lock_Until_Tick = HAL_GetTick() + TOUCHPAD_WHEEL_LOCK_MS;
+  Robot_Hold_Stop();
+  prev_vx_cmd = 0.0f;
+  prev_vy_cmd = 0.0f;
+  prev_omg_cmd = 0.0f;
+  Buzzer_Beep(80);
+}
+
+static void Handle_R1_OpenGrip_Request(void)
+{
+  int16_t current_target = Steering_Target[0];
+  uint8_t nearest_idx = 0u;
+  int32_t diff = (int32_t)current_target - (int32_t)Steering0_Presets[0];
+  int32_t min_abs_diff;
+
+  if (diff < 0)
+  {
+    diff = -diff;
+  }
+  min_abs_diff = diff;
+
+  for (uint8_t i = 1u; i < STEERING0_PRESET_COUNT; i++)
+  {
+    int32_t d = (int32_t)current_target - (int32_t)Steering0_Presets[i];
+    if (d < 0)
+    {
+      d = -d;
+    }
+
+    if (d < min_abs_diff)
+    {
+      min_abs_diff = d;
+      nearest_idx = i;
+    }
+  }
+
+  // R1: map muc kep hien tai sang muc mo tuong ung.
+  Steering0_Preset_Index = nearest_idx;
+  Steering_RequestTarget(0, Steering0_OpenPresets[nearest_idx]);
+  Reset_Button_Sequences();
+  Buzzer_Beep(70);
+}
+
+static void Steering_Id5_LimitStop_RequestFromIsr(void)
+{
+  if (LS_Home_Id5_Homing_Armed == 0u)
+  {
+    return;
+  }
+
+  LS_Id5_RequestStop();
+}
+
+static void Steering_Id5_LimitHome_Process(void)
+{
+  if (LS_Home_Id5_Stop_Request != 0u)
+  {
+    int16_t home_setpoint = Steering_Home_Target[0];
+
+    LS_Home_Id5_Stop_Request = 0u;
+    LS_Home_Id5_Homing_Armed = 0u;
+    DBG_LS_Id5_StopReq = LS_Home_Id5_Stop_Request;
+    DBG_LS_Id5_HomingArmed = LS_Home_Id5_Homing_Armed;
+
+    // Cong tac = 0 (dong) khi ve home: dung ngay va chot lai home cho ID5.
+    Driver_Set_Zero_Position(Steering_Motors[0]);
+
+    // Sau khi chot zero, giu lenh tai moc home (0).
+    Steering_Target[0] = home_setpoint;
+    Steering_Motors[0].Set_Point = home_setpoint;
+    RobotAcceleration_Init(&Steering_Acceleration[0], (float)home_setpoint, STEERING_ACCEL_DURATION_SEC);
+    Steering_Dirty_Mask |= STEERING0_MASK;
+
+    Steering0_Preset_Index = 0u;
+    Reset_Button_Sequences();
+    Buzzer_Beep(120);
   }
 }
 
@@ -332,7 +523,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM5)
   {
-    tick_1ms_flag = 1;
+    if (tick_1ms_pending < 2000u)
+    {
+      tick_1ms_pending++;
+    }
 
     if (++Timer_OVF_Flag_2 > 10)
     {
@@ -351,14 +545,19 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Robot_Hold_Stop(void)
 {
   for (int i = 0; i < WHEEL_MOTOR_COUNT; i++)
+  {
     Wheel_Motors[i].Set_Point = 0;
+    RobotAcceleration_Init(&Wheel_Acceleration[i], 0.0f, WHEEL_ACCEL_DURATION_SEC);
+  }
 }
 
 void Position_Motor_Update(void)
 {
   for (uint8_t i = 0; i < STEERING_MOTOR_COUNT; i++)
   {
-    Steering_Motors[i].Set_Point = Steering_Target[i];
+    float steering_target = (float)Steering_Target[i];
+    RobotAcceleration_SetTarget(&Steering_Acceleration[i], steering_target, STEERING_ACCEL_DURATION_SEC);
+    Steering_Motors[i].Set_Point = ClampToInt16(RobotAcceleration_Update(&Steering_Acceleration[i], CONTROL_DT_SEC));
   }
 }
 
@@ -389,8 +588,6 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
   if (huart->Instance == UART5)
   {
     steering_send_flag = 0;
-    // Stream lien tuc steering setpoint de tranh mat lenh khi bam nut.
-    (void)Steering_Send_Queued();
   }
 }
 
@@ -408,6 +605,24 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   }
 }
 
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == LS_HOME_ID5_Pin)
+  {
+    DBG_LS_Id5_EXTI_Count++;
+    uint32_t now_tick = HAL_GetTick();
+    if ((now_tick - LS_Home_Id5_Last_Tick) < LS_HOME_ID5_DEBOUNCE_MS)
+    {
+      return;
+    }
+
+    LS_Home_Id5_Last_Tick = now_tick;
+    if (LS_Home_Id5_IsClosed() != 0u)
+    {
+      Steering_Id5_LimitStop_RequestFromIsr();
+    }
+  }
+}
 // Xu ly nut bam PS4
 void HandleButtonPress(void)
 {
@@ -458,6 +673,21 @@ void HandleButtonPress(void)
 
   case BUTTON_RELEASED:
     // Theo code mau: xu ly theo nut don le de tranh kich nham khi co combo/noise bitmask.
+    if ((((uint16_t)Last_Button) & ((uint16_t)BUTTON_L1)) != 0u)
+    {
+      Handle_L1_Home_Request();
+      Button_Hold_State = BUTTON_IDLE;
+      Last_Button = BUTTON_NONE;
+      break;
+    }
+    if ((((uint16_t)Last_Button) & ((uint16_t)BUTTON_R1)) != 0u)
+    {
+      Handle_R1_OpenGrip_Request();
+      Button_Hold_State = BUTTON_IDLE;
+      Last_Button = BUTTON_NONE;
+      break;
+    }
+
     switch (Last_Button)
     {
     case BUTTON_CROSS:
@@ -486,17 +716,11 @@ void HandleButtonPress(void)
       break;
 
     case BUTTON_L1:
-      // Home = vi tri startup khi vua bat nguon
-      Steering_RequestTarget(0, Steering_Home_Target[0]);
-      Steering_RequestTarget(1, Steering_Home_Target[1]);
-      Steering0_Preset_Index = 0;
-      Reset_Button_Sequences();
-      Wheel_Lock_Until_Tick = HAL_GetTick() + TOUCHPAD_WHEEL_LOCK_MS;
-      Robot_Hold_Stop();
-      prev_vx_cmd = 0.0f;
-      prev_vy_cmd = 0.0f;
-      prev_omg_cmd = 0.0f;
-      Buzzer_Beep(80);
+      Handle_L1_Home_Request();
+      break;
+
+    case BUTTON_R1:
+      Handle_R1_OpenGrip_Request();
       break;
 
     case BUTTON_LEFT:
@@ -573,10 +797,10 @@ void Mecanum_Calculate(void)
   float vx_cmd, vy_cmd, omg_cmd;
   float angle_error;
   float vx_diff, vy_diff, omg_diff;
-  static uint8_t yaw_manual_rotate_counter = 0;
+  static uint16_t yaw_manual_rotate_counter = 0;
   static float yaw_corr_prev = 0.0f;
-  static uint8_t yaw_deadband_latched = 0;
-
+  static uint8_t yaw_hold_active = 0;
+  static uint16_t yaw_settle_counter = 0;
 
   Mecanum_4_Bot.max_speed = 1.68f - (1.08f * PS4_Dat.r2_analog / 255.0f);
 
@@ -637,46 +861,42 @@ void Mecanum_Calculate(void)
   // Cap nhat goc IMU
   Mecanum_4_Bot.IMU_theta = -IMU.Yaw;
 
-  // PID giu goc neu bat (chi hoat dong khi khong co input xoay tu joystick)
+  // Khoa goc toi uu: co hysteresis + vung im khi dung yen de triet rung lac.
   if (Mecanum_4_Bot.is_yaw_fix)
   {
-    // Chi coi la xoay chu dong khi input xoay du lon va du lau
-    if (fabsf(mapped_z) < YAW_FIX_ROT_INPUT_DEADBAND)
+    float yaw_corr_target = 0.0f;
+    float shortest_err_deg = NormalizeAngleDeg((float)(Mecanum_4_Bot.fix_angle - Mecanum_4_Bot.IMU_theta));
+    float transl_speed = sqrtf((vx_cmd * vx_cmd) + (vy_cmd * vy_cmd));
+    uint8_t is_still = (transl_speed < YAW_FIX_STILL_SPEED_THRESH);
+    float hold_engage_deg = is_still ? YAW_FIX_ENGAGE_ERR_DEG : (YAW_FIX_ENGAGE_ERR_DEG * 0.8f);
+    float hold_release_deg = is_still ? YAW_FIX_RELEASE_ERR_DEG : (YAW_FIX_RELEASE_ERR_DEG * 1.4f);
+    float max_corr_base = is_still ? YAW_FIX_STILL_MAX_CORR : YAW_FIX_MOVE_MAX_CORR;
+    float max_corr = max_corr_base;
+    float fast_err_ratio = 0.0f;
+    float corr_slew = YAW_CORR_SLEW_PER_MS;
+
+    Mecanum_4_Bot.fix_angle = Mecanum_4_Bot.IMU_theta + shortest_err_deg;
+    angle_error = fabsf(shortest_err_deg);
+
+    if (angle_error > YAW_FIX_FAST_ERR_START_DEG)
     {
-      float yaw_corr_target = 0.0f;
-      yaw_manual_rotate_counter = 0;
-      float shortest_err_deg = NormalizeAngleDeg((float)(Mecanum_4_Bot.fix_angle - Mecanum_4_Bot.IMU_theta));
-      Mecanum_4_Bot.fix_angle = Mecanum_4_Bot.IMU_theta + shortest_err_deg;
-      angle_error = fabsf(shortest_err_deg);
-      if (angle_error > YAW_FIX_ACTIVE_ERR_DEG)
-      {
-        float yaw_boost = (angle_error > YAW_FIX_LARGE_ERR_DEG) ? YAW_FIX_LARGE_ERR_BOOST : YAW_FIX_NEAR_BOOST;
-        PID_Compute(&Mecanum_Omega_PID);
-        extern double Mecanum_Omega_PID_Out;
-        yaw_corr_target = (float)Mecanum_Omega_PID_Out * yaw_boost;
-        yaw_deadband_latched = 0;
-      }
-      else
-      {
-        if (!yaw_deadband_latched)
-        {
-          PID_Init(&Mecanum_Omega_PID);
-          yaw_deadband_latched = 1;
-        }
-        yaw_corr_target = 0.0f;
-      }
+      fast_err_ratio = (angle_error - YAW_FIX_FAST_ERR_START_DEG) /
+                       (YAW_FIX_FAST_ERR_FULL_DEG - YAW_FIX_FAST_ERR_START_DEG);
+      fast_err_ratio = ClampFloat(fast_err_ratio, 0.0f, 1.0f);
 
       {
-        float corr_diff = yaw_corr_target - yaw_corr_prev;
-        if (corr_diff > YAW_CORR_SLEW_PER_MS)
-          corr_diff = YAW_CORR_SLEW_PER_MS;
-        else if (corr_diff < -YAW_CORR_SLEW_PER_MS)
-          corr_diff = -YAW_CORR_SLEW_PER_MS;
-        yaw_corr_prev += corr_diff;
+        float boosted_cap = max_corr_base + fast_err_ratio *
+                                            ((Mecanum_4_Bot.max_omega * YAW_FIX_FAST_MAX_CORR_RATIO) - max_corr_base);
+        if (boosted_cap > max_corr)
+        {
+          max_corr = boosted_cap;
+        }
       }
-      omg_cmd += yaw_corr_prev;
     }
-    else if (fabsf(mapped_z) > YAW_FIX_ROT_INTENT_THRESH)
+
+    corr_slew += (fast_err_ratio * YAW_CORR_SLEW_BOOST_PER_MS);
+
+    if (fabsf(mapped_z) > YAW_FIX_ROT_INTENT_THRESH)
     {
       if (yaw_manual_rotate_counter < YAW_FIX_ROT_INTENT_HOLD_MS)
       {
@@ -686,22 +906,113 @@ void Mecanum_Calculate(void)
       if (yaw_manual_rotate_counter >= YAW_FIX_ROT_INTENT_HOLD_MS)
       {
         Mecanum_4_Bot.fix_angle = -IMU.Yaw;
+        yaw_hold_active = 0u;
+        yaw_settle_counter = 0u;
         yaw_corr_prev = 0.0f;
-        yaw_deadband_latched = 0;
+        PID_Init(&Mecanum_Omega_PID);
       }
     }
     else
     {
-      // Vung trung gian: coi la nhiu input xoay, giu nguyen goc khoa
-      yaw_manual_rotate_counter = 0;
-      if (yaw_corr_prev > YAW_CORR_SLEW_PER_MS)
-        yaw_corr_prev -= YAW_CORR_SLEW_PER_MS;
-      else if (yaw_corr_prev < -YAW_CORR_SLEW_PER_MS)
-        yaw_corr_prev += YAW_CORR_SLEW_PER_MS;
+      yaw_manual_rotate_counter = 0u;
+
+      if (fabsf(mapped_z) < YAW_FIX_ROT_INPUT_DEADBAND)
+      {
+        if (!yaw_hold_active)
+        {
+          if (angle_error > hold_engage_deg)
+          {
+            yaw_hold_active = 1u;
+            yaw_settle_counter = 0u;
+          }
+        }
+        else if (angle_error < hold_release_deg)
+        {
+          if (yaw_settle_counter < YAW_FIX_DWELL_MS)
+          {
+            yaw_settle_counter++;
+          }
+          else
+          {
+            yaw_hold_active = 0u;
+            PID_Init(&Mecanum_Omega_PID);
+          }
+        }
+        else
+        {
+          yaw_settle_counter = 0u;
+        }
+
+        if (yaw_hold_active)
+        {
+          PID_Compute(&Mecanum_Omega_PID);
+          extern double Mecanum_Omega_PID_Out;
+          yaw_corr_target = (float)Mecanum_Omega_PID_Out;
+
+          if (angle_error > YAW_FIX_KS_START_DEG)
+          {
+            float ks_ratio = (angle_error - YAW_FIX_KS_START_DEG) /
+                             (YAW_FIX_KS_FULL_DEG - YAW_FIX_KS_START_DEG);
+            float yaw_ks;
+            ks_ratio = ClampFloat(ks_ratio, 0.0f, 1.0f);
+            yaw_ks = YAW_FIX_KS_MIN + ks_ratio * (YAW_FIX_KS_MAX - YAW_FIX_KS_MIN);
+            yaw_corr_target += (shortest_err_deg >= 0.0f) ? yaw_ks : -yaw_ks;
+          }
+
+          yaw_corr_target = ClampFloat(yaw_corr_target, -max_corr, max_corr);
+        }
+      }
       else
-        yaw_corr_prev = 0.0f;
-      omg_cmd += yaw_corr_prev;
+      {
+        // Vung trung gian cua input xoay: xa d?n correction de tranh giat.
+        yaw_hold_active = 0u;
+        yaw_settle_counter = 0u;
+        PID_Init(&Mecanum_Omega_PID);
+      }
     }
+
+    if (!yaw_hold_active && (fabsf(mapped_z) < YAW_FIX_ROT_INPUT_DEADBAND))
+    {
+      if (yaw_corr_prev > YAW_CORR_DECAY_PER_MS)
+      {
+        yaw_corr_prev -= YAW_CORR_DECAY_PER_MS;
+      }
+      else if (yaw_corr_prev < -YAW_CORR_DECAY_PER_MS)
+      {
+        yaw_corr_prev += YAW_CORR_DECAY_PER_MS;
+      }
+      else
+      {
+        yaw_corr_prev = 0.0f;
+      }
+    }
+    else
+    {
+      float corr_diff = yaw_corr_target - yaw_corr_prev;
+      if (corr_diff > corr_slew)
+      {
+        corr_diff = corr_slew;
+      }
+      else if (corr_diff < -corr_slew)
+      {
+        corr_diff = -corr_slew;
+      }
+      yaw_corr_prev += corr_diff;
+    }
+
+    if (is_still && (angle_error < hold_engage_deg) && (fabsf(yaw_corr_prev) < (YAW_FIX_STILL_MAX_CORR * 0.20f)))
+    {
+      yaw_corr_prev = 0.0f;
+    }
+
+    omg_cmd += yaw_corr_prev;
+  }
+  else
+  {
+    yaw_manual_rotate_counter = 0u;
+    yaw_hold_active = 0u;
+    yaw_settle_counter = 0u;
+    yaw_corr_prev = 0.0f;
   }
 
   omg_cmd = ClampFloat(omg_cmd, -Mecanum_4_Bot.max_omega, Mecanum_4_Bot.max_omega);
@@ -709,15 +1020,17 @@ void Mecanum_Calculate(void)
   // Tinh dong hoc Mecanum
   MecanumRobot_SetMotion(&Mecanum_4_Bot, vx_cmd, vy_cmd, omg_cmd, IMU.Yaw, 0);
 
-  int16_t cmd_m1 = ClampToInt16(Mecanum_4_Bot.u[0] * WHEEL1_GAIN);
-  int16_t cmd_m2 = ClampToInt16(-Mecanum_4_Bot.u[1] * WHEEL2_GAIN);
-  int16_t cmd_m3 = ClampToInt16(-Mecanum_4_Bot.u[2] * WHEEL3_GAIN);
-  int16_t cmd_m4 = ClampToInt16(-Mecanum_4_Bot.u[3] * WHEEL4_GAIN);
+  float wheel_targets[WHEEL_MOTOR_COUNT] = {
+      Mecanum_4_Bot.u[0] * WHEEL1_GAIN,
+      -Mecanum_4_Bot.u[1] * WHEEL2_GAIN,
+      -Mecanum_4_Bot.u[2] * WHEEL3_GAIN,
+      -Mecanum_4_Bot.u[3] * WHEEL4_GAIN};
 
-  Wheel_Motors[0].Set_Point = cmd_m1;
-  Wheel_Motors[1].Set_Point = cmd_m2;
-  Wheel_Motors[2].Set_Point = cmd_m3;
-  Wheel_Motors[3].Set_Point = cmd_m4;
+  for (uint8_t i = 0; i < WHEEL_MOTOR_COUNT; i++)
+  {
+    RobotAcceleration_SetTarget(&Wheel_Acceleration[i], wheel_targets[i], WHEEL_ACCEL_DURATION_SEC);
+    Wheel_Motors[i].Set_Point = ClampToInt16(RobotAcceleration_Update(&Wheel_Acceleration[i], CONTROL_DT_SEC));
+  }
 }
 
 // Cap nhat motor
@@ -725,6 +1038,7 @@ void Motor_Update(void)
 {
   static uint8_t prev_timeout_state = 0;
   static uint8_t first_connect_beep_done = 0;
+  static uint8_t steering_refresh_counter = 0;
   Timer_Timeout_Check(Task_TO);
 
   if (Task_TO[0].Time_Out_Flag == 1)
@@ -745,7 +1059,7 @@ void Motor_Update(void)
       prev_timeout_state = 0;
     }
 
-    if (!PS4_Ever_Connected && !first_connect_beep_done)
+    if (!first_connect_beep_done && (PS4_LastRxTick != 0u))
     {
       PS4_Ever_Connected = 1;
       first_connect_beep_done = 1;
@@ -761,9 +1075,17 @@ void Motor_Update(void)
     }
   }
 
-  if (steering_send_flag == 0)
+  if (steering_refresh_counter < STEERING_REFRESH_MS)
   {
-    (void)Steering_Send_Queued();
+    steering_refresh_counter++;
+  }
+
+  if ((steering_send_flag == 0u) && ((Steering_Dirty_Mask != 0u) || (steering_refresh_counter >= STEERING_REFRESH_MS)))
+  {
+    if (Steering_Send_Queued() == HAL_OK)
+    {
+      steering_refresh_counter = 0;
+    }
   }
 }
 
@@ -841,7 +1163,21 @@ int main(void)
   Assign_PID_AML_Id(&Steering_Motors[0], 5);
   Assign_PID_AML_Id(&Steering_Motors[1], 6);
 
+  for (uint8_t i = 0; i < WHEEL_MOTOR_COUNT; i++)
+  {
+    RobotAcceleration_Init(&Wheel_Acceleration[i], 0.0f, WHEEL_ACCEL_DURATION_SEC);
+  }
+
+  for (uint8_t i = 0; i < STEERING_MOTOR_COUNT; i++)
+  {
+    RobotAcceleration_Init(&Steering_Acceleration[i], (float)Steering_Target[i], STEERING_ACCEL_DURATION_SEC);
+  }
+
   Steering_SoftHome_FromReference();
+  // Tu dong tim home ID5 ngay khi bat main (khong can bam L1).
+  Handle_L1_Home_Request();
+  Steering_Id5_LimitLevel_Monitor();
+  Steering_Id5_LimitHome_Process();
 
   (void)Driver_Send_Setpoints_U1(Wheel_Motors, WHEEL_MOTOR_COUNT);
   (void)Steering_Send_Queued();
@@ -860,6 +1196,10 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Debug_Snapshot_Update();
+    Steering_Id5_LimitLevel_Monitor();
+    Steering_Id5_LimitHome_Process();
+
     /*----------------------------XU LY RESET GOC IMU----------------------------*/
     if (Robot_Reset_Home)
     {
@@ -869,19 +1209,30 @@ int main(void)
     }
     /*----------------------------MAIN LOOP - X\u1eeaL L\u00dd THEO FLAG----------------------------*/
     /* Ch\u1ec9 x\u1eed l\u00fd khi c\u00f3 flag t\u1eeb timer interrupt */
-    if (tick_1ms_flag)
+    if (tick_1ms_pending != 0u)
     {
-      tick_1ms_flag = 0;
+      uint16_t pending_ticks;
 
-      /* 1. X\u1eed l\u00fd PS4 request */
-      PS4_Process();
+      __disable_irq();
+      pending_ticks = tick_1ms_pending;
+      tick_1ms_pending = 0u;
+      __enable_irq();
 
-      /* 2. T\u00ednh to\u00e1n \u0111\u1ed9ng h\u1ecdc Mecanum */
-      Mecanum_Calculate();
+      while (pending_ticks-- > 0u)
+      {
+        /* 1. Xu ly PS4 request */
+        PS4_Process();
 
-      /* 3. C\u1eadp nh\u1eadt motor (bao g\u1ed3m timeout check) */
-      Position_Motor_Update();
-      Motor_Update();
+        /* 2. Tinh toan dong hoc Mecanum */
+        Mecanum_Calculate();
+
+        /* 3. Cap nhat motor (bao gom timeout check) */
+        Debug_Snapshot_Update();
+        Steering_Id5_LimitLevel_Monitor();
+        Steering_Id5_LimitHome_Process();
+        Position_Motor_Update();
+        Motor_Update();
+      }
     }
   }
   /* USER CODE END 3 */
@@ -1008,3 +1359,14 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+
+
+
+
+
+
+
+
+

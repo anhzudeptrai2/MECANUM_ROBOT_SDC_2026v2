@@ -59,6 +59,9 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define Buzzer_Pin GPIO_PIN_4
 #define Buzzer_GPIO_Port GPIOE
+#define LS_HOME_ID5_Pin GPIO_PIN_11
+#define LS_HOME_ID5_GPIO_Port GPIOB
+#define LS_HOME_ID5_EXTI_IRQn EXTI15_10_IRQn
 
 /* USER CODE BEGIN Private defines */
 

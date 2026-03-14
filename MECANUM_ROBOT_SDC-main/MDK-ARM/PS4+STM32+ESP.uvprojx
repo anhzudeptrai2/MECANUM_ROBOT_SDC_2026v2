@@ -464,6 +464,11 @@
               <FilePath>..\Core\Src\CRC_16.c</FilePath>
             </File>
             <File>
+              <FileName>ROBOT_ACCELERATION.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\ROBOT_ACCELERATION.c</FilePath>
+            </File>
+            <File>
               <FileName>DRIVER_PID_AML.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\Inc\DRIVER_PID_AML.h</FilePath>
@@ -487,6 +492,11 @@
               <FileName>TIMER_TIMEOUT.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\Inc\TIMER_TIMEOUT.h</FilePath>
+            </File>
+            <File>
+              <FileName>ROBOT_ACCELERATION.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\Inc\ROBOT_ACCELERATION.h</FilePath>
             </File>
             <File>
               <FileName>main.c</FileName>
